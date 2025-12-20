@@ -35,7 +35,7 @@ Select: conda: vo_env
 
 Open a VS Code terminal and run:
 
-`python -c "import cv2; print(cv2.version)"`
+`python -c "import cv2; print(cv2.__version__)"`
 
 An OpenCV version 4.8 or higher should be printed.
 
