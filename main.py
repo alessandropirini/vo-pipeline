@@ -102,7 +102,7 @@ class VO_Params():
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     # ADD NEW PARAMS HERE
-    alpha: float = 0.11
+    alpha: float = 0.01
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
@@ -249,17 +249,14 @@ class Pipeline():
             points1[inliers] (N, 1, 2): inlier points from first keyframe
             points2[inliers] (N, 1, 2): inlier points from second keyframe
         """
-        #F mat using ransac
-        fundamental_matrix, inliers =cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
+        # E mat using ransac
+        E, inliers =cv2.findEssentialMat(points1, points2, K, method=cv2.RANSAC)
 
         #using boolean vector
         inliers = inliers.ravel().astype(bool)
 
-        #compute the essential matrix
-        E= K.T@ fundamental_matrix@K
-
         #recover the relative camera pose
-        _,R,t,mask_pose=cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        _, R, t, _ =cv2.recoverPose(E, points1[inliers], points2[inliers], K)
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
@@ -309,7 +306,7 @@ class Pipeline():
 
         return S
 
-    def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> dict[str:np.ndarray]:
+    def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
         """
         Track 2D keypoints from img_1 to img_2 using KLT optical flow
 
@@ -318,10 +315,13 @@ class Pipeline():
             img_2 (np.ndarray): second image (grayscale)
             points_1 (np.ndarray): keypoints in img_1 to be tracked
         Returns:
-            np.ndarray: tracked keypoints in img_2
+            dict[str: np.ndarray]: updated state
+            np.ndarray: keypoints from the previous frame that were successfully tracked forward
+            np.ndarray: candidate keypoints from the previous frame that were successfully tracked forward
         """
         # NOTE: might make sense to replace assert with ifs since maybe even if we have no points nor candidates we still want to return them empty again
         # FIRST WE TRACK "ESTABILISHED KEYPOINTS"
+        new_state = state.copy()
         points_2D = self.as_lk_points(state["P"])
         assert points_2D.shape[0] > 0, "There are no keypoints here, we can't track them forward"    
 
@@ -329,9 +329,8 @@ class Pipeline():
         status = status.flatten()   # we are going to use them as booleans so maybe we should cast them with astype (?)
         
         # update the state with the current points
-        state["P"] = current_points[status == 1]
-        state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
-        
+        new_state["P"] = current_points[status == 1]
+        new_state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
 
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
@@ -342,15 +341,15 @@ class Pipeline():
             current_cands, status_cands, _ = cv2.calcOpticalFlowPyrLK(prevImg=img_1, nextImg=img_2, prevPts=candidates, nextPts=None, **self.params.klt_params)
             status_cands = status_cands.flatten() # same as above
             
-            state["C"] = current_cands[status_cands == 1]
+            new_state["C"] = current_cands[status_cands == 1]
 
             # initial observations, still have some doubts on these two
-            state["F"] = state["F"][status_cands == 1]
-            state["T"] = state["T"][status_cands == 1]
+            new_state["F"] = state["F"][status_cands == 1]
+            new_state["T"] = state["T"][status_cands == 1]
 
-        return state
+        return new_state, points_2D[status == 1], candidates[status_cands == 1]
 
-    def estimatePose(self, state: dict[str:np.ndarray]) -> tuple[dict[str:np.ndarray], np.ndarray]:
+    def estimatePose(self, state: dict[str:np.ndarray]) -> tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
         """
         Estimate camera pose using PnP RANSAC and update state to keep only inliers
         
@@ -359,7 +358,7 @@ class Pipeline():
             state (dict): current state that also contains 2D keypoints and 3D points
         
         Returns:
-            tuple[dict, np.ndarray]: updated state with only inliers for P and X and camera pose as 3x4 matrix
+            tuple[dict, np.ndarray, np.ndarray]: updated state with only inliers for P and X and camera pose as 3x4 matrix and index of inliers
         """
         
         pts_2D = state["P"][:, 0, :]
@@ -367,6 +366,10 @@ class Pipeline():
         pts_3D = pts_3D.T # according to documentation we need them as kx3 not 3xk
         K = self.params.k
         
+        # print("Shape of 2D points")
+        # print(pts_2D.shape)
+        # print("Shape of 3D points")
+        # print(pts_3D.shape)
         success, r_vec, t_vec, inliers_idx =  cv2.solvePnPRansac(
             objectPoints=pts_3D,
             imagePoints=pts_2D,
@@ -374,7 +377,7 @@ class Pipeline():
             distCoeffs=None,
             flags=cv2.SOLVEPNP_EPNP,
             reprojectionError=2.0,
-            confidence=0.999,
+            confidence=0.9,
             iterationsCount=100
         )
 
@@ -392,8 +395,13 @@ class Pipeline():
         # by doing the following thing the idea is that we are only keeping the inliers
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
-        
-        return (new_state, camera_pose)
+        # print("Shape of 2D points")
+        # print(new_state["P"].shape)
+        # print("Shape of 3D points")
+        # print(new_state["X"].shape)
+        return new_state, camera_pose, inliers_idx
+    
+
     
     def tryTriangulating(self, params: VO_Params, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
         """
@@ -406,8 +414,9 @@ class Pipeline():
         Returns:
             tuple[dict, np.ndarray]: updated state with only inliers for P and X and camera pose as 3x4 matrix
         """
-        
-        if state["C"].shape[0] == 0:
+        new_state = state.copy()
+        #print(new_state)
+        if new_state["C"].shape[0] == 0:
             return state
 
         pts_2D_cur = state["C"]  #(m,1,2)
@@ -417,11 +426,11 @@ class Pipeline():
         m = pts_2D_cur.shape[0]
         if pts_2D_first_obs.shape[0] != m: 
             print("ERROR in shapes of tracked keypoints")
-        print(f"2d_cur shape: {pts_2D_cur.shape}\n2d_first shape: {pts_2D_first_obs.shape}\n")
+        #print(f"2d_cur shape: {pts_2D_cur.shape}\n2d_first shape: {pts_2D_first_obs.shape}\n")
 
         pts_2D_cur_hom = np.column_stack((pts_2D_cur, np.ones(m)))
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
-        K = params.k
+        K = self.params.k
         K_inv = np.linalg.inv(K)
         n_pts_2D_cur = K_inv@pts_2D_cur_hom.T #(3,m)
         n_pts_2D_first_obs = K_inv@pts_2D_first_obs_hom.T #(3,m)
@@ -482,15 +491,15 @@ class Pipeline():
             
             pixel_coords = valid_pts_2.T  #(k,2)
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (k,1,2)
-            state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+k,1 ,2)
-            state["X"] = np.concatenate((state["X"], points_3d), axis = 1) #(3, n+k)
+            new_state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+k,1 ,2)
+            new_state["X"] = np.concatenate((state["X"], points_3d), axis = 1) #(3, n+k)
         
         #Update the candidate set removing the now triangulated points 
-        state["C"] = pts_2D_cur[not_idx, None, :]
-        state["F"] = pts_2D_first_obs[not_idx, None, :]
-        state["T"] = first_poses_mat[not_idx, :]
+        new_state["C"] = pts_2D_cur[not_idx, None, :]
+        new_state["F"] = pts_2D_first_obs[not_idx, None, :]
+        new_state["T"] = first_poses_mat[not_idx, :]
         
-        return state
+        return new_state
 
 
     def extractFeaturesOperation(self, img_grayscale):
@@ -551,7 +560,7 @@ class Pipeline():
         Returns:
             dict: updated state
         """
-        S_old = S.copy()
+        S_new = S.copy()
 
         # setup
         cur = np.vstack((S["P"], S["C"]))[:, 0, :]
@@ -570,10 +579,10 @@ class Pipeline():
         new_features = potential_candidate_features[new_features_mask, :, :]
 
         # append new features to current points, first observed points, and first observed camera pose
-        S["C"] = np.vstack((S_old["C"], new_features))
-        S["F"] = np.vstack((S_old["F"], new_features))
-        S["T"] = np.vstack((S_old["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
-        return S
+        S_new["C"] = np.vstack((S["C"], new_features))
+        S_new["F"] = np.vstack((S["F"], new_features))
+        S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
+        return S_new
 
     plt.ion()
 
@@ -683,6 +692,91 @@ class Pipeline():
             x = x[:, None, :]
 
         return np.ascontiguousarray(x, dtype=np.float32)
+    
+    # THIS IS CHAT!!
+    @staticmethod
+    def draw_optical_flow(
+        img: np.ndarray,
+        pts_prev: np.ndarray,
+        pts_curr: np.ndarray,
+        color=(0, 255, 0),
+        thickness=1,
+        tipLength=0.3,
+    ) -> np.ndarray:
+        """
+        Draw arrows from previous to current 2D points.
+
+        Args:
+            img (np.ndarray): BGR image to draw on
+            pts_prev (np.ndarray): (N, 1, 2) previous points
+            pts_curr (np.ndarray): (N, 1, 2) current points
+            color (tuple): BGR color
+            thickness (int): line thickness
+            tipLength (float): arrow tip size
+
+        Returns:
+            np.ndarray: image with optical flow arrows
+        """
+        vis = img.copy()
+
+        # Remove singleton dimension → (N, 2)
+        p0 = pts_prev.reshape(-1, 2)
+        p1 = pts_curr.reshape(-1, 2)
+
+        for (x0, y0), (x1, y1) in zip(p0, p1):
+            pt0 = (int(round(x0)), int(round(y0)))
+            pt1 = (int(round(x1)), int(round(y1)))
+
+            cv2.arrowedLine(
+                vis,
+                pt0,
+                pt1,
+                color,
+                thickness,
+                tipLength=tipLength,
+            )
+
+        return vis
+
+    @staticmethod
+    def draw_new_features(
+        img: np.ndarray,
+        new_pts: np.ndarray,
+        color=(0, 0, 255),
+        radius: int = 2,
+        thickness: int = -1,
+    ) -> np.ndarray:
+        """
+        Draw newly detected 2D features as small circles.
+
+        Args:
+            img (np.ndarray): BGR image to draw on
+            new_pts (np.ndarray): (N, 1, 2) or (N, 2) array of points
+            color (tuple): BGR color (default red)
+            radius (int): circle radius in pixels
+            thickness (int): -1 for filled circle
+
+        Returns:
+            np.ndarray: image with drawn circles
+        """
+        vis = img.copy()
+
+        if new_pts.size == 0:
+            return vis
+
+        pts = new_pts.reshape(-1, 2)
+
+        for x, y in pts:
+            cv2.circle(
+                vis,
+                (int(round(x)), int(round(y))),
+                radius,
+                color,
+                thickness,
+            )
+
+        return vis
+
 
 # Create instance of pipeline
 pipeline = Pipeline(params)
@@ -695,12 +789,14 @@ bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trac
 
 # calculate the homographic transformation between the first two keyframes
 homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.ransacHomography(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
-
+print(homography)
 # triangulate features from the first two keyframes to generate initial 3D point cloud
 bootstrap_point_cloud = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
 
 # generate initial state
 S = pipeline.bootstrapState(P_i=ransac_features_kf_2, X_i=bootstrap_point_cloud)
+print("Bootstrapped state")
+#print(S)
 
 # ploting setup
 plot_state = pipeline.initTrajectoryPlot(ground_truth)
@@ -718,7 +814,6 @@ potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
 
 for i in range(params.start_idx + 1, last_frame + 1):
-
     # read in next image
     image_path = images[i]
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -727,31 +822,39 @@ for i in range(params.start_idx + 1, last_frame + 1):
         continue
 
     # track keypoints forward one frame
-    S = pipeline.trackForward(S, last_image, image)
+    S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
+    
+    # plot tracked keypoints (pre-ransac) and candidate keypoints
+    img_to_show = pipeline.draw_optical_flow(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), last_features, S["P"], (255, 0, 0), 1, .15)
+    img_to_show = pipeline.draw_optical_flow(img_to_show, last_candidates, S["C"], (0, 0, 255), 1, .15)
 
     # estimate pose, only keeping inliers from PnP with RANSAC
-    S, pose = pipeline.estimatePose(S)
+    S, pose, inliers_idx = pipeline.estimatePose(S)
+
+    # plot inlier keypoints
+    img_to_show = pipeline.draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
     # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
     S = pipeline.tryTriangulating(params, S, pose)
 
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
+    # img_to_show = pipeline.draw_new_features(img_to_show, potential_candidate_features)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
 
     # plot current pose
-    est_path.append(-1*pose[:2, 3])
+    est_path.append(-1*np.array([pose[0, 3], pose[2, 3]]))
     theta = scipy.spatial.transform.Rotation.from_matrix(pose[:3, :3]).as_euler("xyz")[1]
-    print(est_path[-1])
-    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi)
+    # print(est_path[-1])
+    #pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi)
 
     # update last image
     last_image = image
 
     # pause for 0.01 seconds
-    cv2.imshow("tracking...", last_image)
+    cv2.imshow("tracking...", img_to_show)
     cv2.waitKey(10)
 
 cv2.destroyAllWindows()
