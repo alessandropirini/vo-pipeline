@@ -25,7 +25,7 @@ parking_path = "parking/parking"
 if DATASET == 0:
     assert 'kitti_path' in locals(), "You must define kitti_path"
     img_dir = os.path.join(kitti_path, '05/image_0')
-    images = glob(os.path.join(img_dir, '*.png'))
+    images = sorted(glob(os.path.join(img_dir, '*.png')))
     last_frame = 4540
     K = np.array([
         [7.18856e+02, 0, 6.071928e+02],
@@ -50,7 +50,7 @@ elif DATASET == 1:
 elif DATASET == 2:
     assert 'parking_path' in locals(), "You must define parking_path"
     img_dir = os.path.join(parking_path, 'images')
-    images = glob(os.path.join(img_dir, '*.png'))
+    images = sorted(glob(os.path.join(img_dir, '*.png')))
     last_frame = 598
     K = np.loadtxt(os.path.join(parking_path, 'K.txt'), delimiter=",", usecols=(0, 1, 2))
     ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
