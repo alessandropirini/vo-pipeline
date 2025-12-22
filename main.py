@@ -250,13 +250,13 @@ class Pipeline():
             points2[inliers] (N, 1, 2): inlier points from second keyframe
         """
         # E mat using ransac
-        E, inliers =cv2.findEssentialMat(points1, points2, K, method=cv2.RANSAC)
+        E, inliers = cv2.findEssentialMat(points1, points2, K, method=cv2.RANSAC)
 
         #using boolean vector
         inliers = inliers.ravel().astype(bool)
 
         #recover the relative camera pose
-        _, R, t, _ =cv2.recoverPose(E, points1[inliers], points2[inliers], K)
+        _, R, t, _ = cv2.recoverPose(E, points1[inliers], points2[inliers], K)
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
