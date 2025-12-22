@@ -19,7 +19,7 @@ DATASET = 2
 # (Set these variables before running)
 kitti_path = "kitti/kitti05/kitti"
 malaga_path = "malaga/malaga-urban-dataset-extract-07"
-parking_path = "parking"
+parking_path = "parking/parking"
 # own_dataset_path = "/path/to/own_dataset"
 
 if DATASET == 0:
@@ -299,11 +299,7 @@ class Pipeline():
         assert P_i.shape[0] == X_i.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
         
         S["P"] = P_i    
-        S["X"] = X_i  
-        # print("2d points shape")
-        # print(P_i.shape)
-        # print("£d points shape")
-        # print(X_i.shape)  
+        S["X"] = X_i    
         S["C"] = np.empty((0,1,2))
         S["F"] = np.empty_like(S["C"])
         S["T"] = np.empty((0,12))
@@ -326,7 +322,6 @@ class Pipeline():
         # NOTE: might make sense to replace assert with ifs since maybe even if we have no points nor candidates we still want to return them empty again
         # FIRST WE TRACK "ESTABILISHED KEYPOINTS"
         new_state = state.copy()
-        new_state = state.copy()
         points_2D = self.as_lk_points(state["P"])
         assert points_2D.shape[0] > 0, "There are no keypoints here, we can't track them forward"    
 
@@ -334,8 +329,6 @@ class Pipeline():
         status = status.flatten()   # we are going to use them as booleans so maybe we should cast them with astype (?)
         
         # update the state with the current points
-        new_state["P"] = current_points[status == 1]
-        new_state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
         new_state["P"] = current_points[status == 1]
         new_state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
 
@@ -349,15 +342,12 @@ class Pipeline():
             status_cands = status_cands.flatten() # same as above
             
             new_state["C"] = current_cands[status_cands == 1]
-            new_state["C"] = current_cands[status_cands == 1]
 
             # initial observations, still have some doubts on these two
             new_state["F"] = state["F"][status_cands == 1]
             new_state["T"] = state["T"][status_cands == 1]
-            new_state["F"] = state["F"][status_cands == 1]
-            new_state["T"] = state["T"][status_cands == 1]
 
-        return new_state
+        return new_state, points_2D[status == 1], candidates[status_cands == 1]
 
     def estimatePose(self, state: dict[str:np.ndarray]) -> tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
         """
@@ -376,10 +366,6 @@ class Pipeline():
         pts_3D = pts_3D.T # according to documentation we need them as kx3 not 3xk
         K = self.params.k
         
-        # print("Shape of 2D points")
-        # print(pts_2D.shape)
-        # print("Shape of 3D points")
-        # print(pts_3D.shape)
         # print("Shape of 2D points")
         # print(pts_2D.shape)
         # print("Shape of 3D points")
@@ -413,11 +399,11 @@ class Pipeline():
         # print(new_state["P"].shape)
         # print("Shape of 3D points")
         # print(new_state["X"].shape)
-        return (new_state, camera_pose)
+        return new_state, camera_pose, inliers_idx
     
 
     
-    def tryTriangulating(self, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
+    def tryTriangulating(self, params: VO_Params, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
         """
         Triangulate new points based on the bearing angle threshold to ensure sufficient baseline without relying on scale (ambiguous)
         
@@ -428,9 +414,6 @@ class Pipeline():
         Returns:
             tuple[dict, np.ndarray]: updated state with only inliers for P and X and camera pose as 3x4 matrix
         """
-        new_state = state.copy()
-        #print(new_state)
-        if new_state["C"].shape[0] == 0:
         new_state = state.copy()
         #print(new_state)
         if new_state["C"].shape[0] == 0:
@@ -510,18 +493,12 @@ class Pipeline():
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (k,1,2)
             new_state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+k,1 ,2)
             new_state["X"] = np.concatenate((state["X"], points_3d), axis = 1) #(3, n+k)
-            new_state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+k,1 ,2)
-            new_state["X"] = np.concatenate((state["X"], points_3d), axis = 1) #(3, n+k)
         
         #Update the candidate set removing the now triangulated points 
         new_state["C"] = pts_2D_cur[not_idx, None, :]
         new_state["F"] = pts_2D_first_obs[not_idx, None, :]
         new_state["T"] = first_poses_mat[not_idx, :]
-        new_state["C"] = pts_2D_cur[not_idx, None, :]
-        new_state["F"] = pts_2D_first_obs[not_idx, None, :]
-        new_state["T"] = first_poses_mat[not_idx, :]
         
-        return new_state
         return new_state
 
 
@@ -584,7 +561,6 @@ class Pipeline():
             dict: updated state
         """
         S_new = S.copy()
-        S_new = S.copy()
 
         # setup
         cur = np.vstack((S["P"], S["C"]))[:, 0, :]
@@ -603,10 +579,6 @@ class Pipeline():
         new_features = potential_candidate_features[new_features_mask, :, :]
 
         # append new features to current points, first observed points, and first observed camera pose
-        S_new["C"] = np.vstack((S["C"], new_features))
-        S_new["F"] = np.vstack((S["F"], new_features))
-        S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
-        return S_new
         S_new["C"] = np.vstack((S["C"], new_features))
         S_new["F"] = np.vstack((S["F"], new_features))
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
@@ -840,11 +812,8 @@ potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
-print("Added new features")
-#print(S)
 
 for i in range(params.start_idx + 1, last_frame + 1):
-    #print(i)
     # read in next image
     image_path = images[i]
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -853,8 +822,12 @@ for i in range(params.start_idx + 1, last_frame + 1):
         continue
 
     # track keypoints forward one frame
-    S = pipeline.trackForward(S, last_image, image)
-    #print(S)
+    S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
+    
+    # plot tracked keypoints (pre-ransac) and candidate keypoints
+    img_to_show = pipeline.draw_optical_flow(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), last_features, S["P"], (255, 0, 0), 1, .15)
+    img_to_show = pipeline.draw_optical_flow(img_to_show, last_candidates, S["C"], (0, 0, 255), 1, .15)
+
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
 
