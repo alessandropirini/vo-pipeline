@@ -751,7 +751,7 @@ for i in range(params.start_idx + 1, last_frame + 1):
     S, pose = pipeline.estimatePose(S)
 
     # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(S, pose)
+    S = pipeline.tryTriangulating(params, S, pose)
 
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
@@ -760,10 +760,10 @@ for i in range(params.start_idx + 1, last_frame + 1):
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
 
     # plot current pose
-    est_path.append(pose[:2, 3])
+    est_path.append(-1*pose[:2, 3])
     theta = scipy.spatial.transform.Rotation.from_matrix(pose[:3, :3]).as_euler("xyz")[1]
     print(est_path[-1])
-    #updateTrajectoryPlot(plot_state, np.asarray(est_path), theta)
+    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi)
 
     # update last image
     last_image = image
