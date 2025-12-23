@@ -65,18 +65,18 @@ else:
     raise ValueError("Invalid dataset index")
 
 # Paramaters for Shi-Tomasi corners
-feature_params = dict( maxCorners = 100,
-                       qualityLevel = 0.08,
-                       minDistance = 7,
+feature_params = dict( maxCorners = 150,
+                       qualityLevel = 0.05,
+                       minDistance = 5,
                        blockSize = 7 )
 
 # Parameters for LKT
-lk_params = dict( winSize  = (20, 20),
+lk_params = dict( winSize  = (21, 21),
                   maxLevel = 2,
                   criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
 # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-new_feature_min_squared_diff = 10
+new_feature_min_squared_diff = 5
 
 
 # Next keyframe to use for bootstrapping
@@ -102,7 +102,7 @@ class VO_Params():
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     # ADD NEW PARAMS HERE
-    alpha: float = 0.04
+    alpha: float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
@@ -369,8 +369,8 @@ class Pipeline():
             distCoeffs=None,
             flags=cv2.SOLVEPNP_EPNP,
             reprojectionError=5.0,
-            confidence=0.9,
-            iterationsCount=100
+            confidence=0.99,
+            iterationsCount=120
         )
 
         if not success:
@@ -391,7 +391,6 @@ class Pipeline():
         return new_state, camera_pose, inliers_idx
     
 
-    
     def tryTriangulating(self, params: VO_Params, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
         """
         Triangulate new points based on the bearing angle threshold to ensure sufficient baseline without relying on scale (ambiguous)
@@ -470,17 +469,21 @@ class Pipeline():
         proj_2 = K @ cur_pose
         
         for i, g in enumerate(groups):
-            proj_1 = K@(unique_poses[i].reshape(3,4))
+
+            c_1_pose = unique_poses[i].reshape(3,4)
+            proj_1 = K@c_1_pose
             valid_pts_1 = valid_pts_2D_first[g].T #(2,k)
             valid_pts_2 = valid_pts_2D_cur[g].T #(2,k)
             points_homo = cv2.triangulatePoints(proj_1, proj_2, valid_pts_1, valid_pts_2)
+            
             # convert back to 3D
             points_3d = (points_homo[:3, :]/points_homo[3, :]) #(3,k)
-            
-            pixel_coords = valid_pts_2.T  #(k,2)
-            pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (k,1,2)
-            state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+k,1 ,2)
-            state["X"] = np.concatenate((state["X"], points_3d), axis = 1) #(3, n+k)
+            valid_3d_pts, mask = self.chierality_check(points_3d, c_1_pose, cur_pose ) #(3,j)
+
+            pixel_coords = valid_pts_2[:, mask].T  #(j,2)
+            pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
+            state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+j,1 ,2)
+            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis = 1) #(3, n+j)
         
         #Update the candidate set removing the now triangulated points 
         state["C"] = pts_2D_cur[not_idx, None, :]
@@ -488,6 +491,28 @@ class Pipeline():
         state["T"] = first_poses_mat[not_idx, :]
         
         return state
+
+    def chierality_check(self, points_3d, Pi_1, Pi_2): 
+        """
+        Checks whether the newly triangulated points are in front of both cameras
+
+        Args:
+            points_3d (np.ndarray) a (3,k) vector containing the newly triangulated points 
+            Pi_1: the 3x4 homogeneous transformation matrix of the first camera
+            Pi_2: the 3x4 homogeneous transformation matrix of the second camera
+        Returns:
+            tuple[valid_pts (np.ndarray), mask]: (3, j) posiitve-depth points and mask of valid points 
+        """
+
+        #Transform from world coordinates into camera coordinates
+        points_3d_hom = np.vstack((points_3d, np.ones(points_3d.shape[1])))
+        p_3d_1 = Pi_1 @ points_3d_hom #(3,k)
+        p_3d_2 = Pi_2 @ points_3d_hom #(3,k)
+
+        mask = (p_3d_1[2,:]>0) & (p_3d_2[2,:]>0)
+
+        valid_pts = points_3d[:,mask] #(3,j)
+        return valid_pts, mask
 
 
     def extractFeaturesOperation(self, img_grayscale):
@@ -572,111 +597,116 @@ class Pipeline():
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
 
-    plt.ion()
 
-    def initTrajectoryPlot(self, gt_path: np.ndarray, arrow_len: float = 0.3) -> Dict[str, object]:
-        """
-        Initialize trajectory plot with ground truth and placeholders
-        for estimated trajectory and camera orientation.
+    def initTrajectoryPlot(self, gt_path: np.ndarray, arrow_len: float = 0.3):
+        plt.ion()
+        fig, (ax_global, ax_local) = plt.subplots(1, 2, figsize=(14, 6))
 
-        Args:
-            gt_path (np.ndarray): Ground truth path [n x 2]
-            arrow_len (float): Length of orientation arrow (meters)
-
-        Returns:
-            dict: plot state dictionary
-        """
-        fig, ax = plt.subplots(figsize=(8, 6))
-
+        # ---------- GLOBAL TRAJECTORY ----------
         if DATASET in [0, 2]:
-            # ---- Ground truth (time-colored) ----
             x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
-            t = np.arange(len(gt_path))
+            points = np.stack((x_gt, y_gt), axis=1)
+            ax_global.plot(points[:, 0], points[:, 1], color="gray", lw=2, label="GT")
 
-            points = np.stack((x_gt, y_gt), axis=1).reshape(-1, 1, 2)
-            segments = np.concatenate((points[:-1], points[1:]), axis=1)
+        est_line, = ax_global.plot([], [], "r-", lw=2, label="VO")
+        est_point, = ax_global.plot([], [], "ro")
 
-            norm = mpl.colors.Normalize(vmin=t.min(), vmax=t.max())
-            lc = LineCollection(segments, cmap="viridis", norm=norm, linewidth=2.5)
-            lc.set_array(t)
+        heading_arrow = FancyArrowPatch((0, 0), (0, 0),
+                                        arrowstyle="->",
+                                        color="red",
+                                        linewidth=2,
+                                        mutation_scale=15)
+        ax_global.add_patch(heading_arrow)
 
-            ax.add_collection(lc)
-            cbar = fig.colorbar(lc, ax=ax)
-            cbar.set_label("Time step (GT)")
+        ax_global.set_title("Global trajectory")
+        ax_global.axis("equal")
+        ax_global.grid(True)
+        ax_global.legend()
 
-        # ---- Estimated trajectory ----
-        est_line, = ax.plot([], [], "r-", linewidth=2, label="VO estimate")
-        est_point, = ax.plot([], [], "ro", markersize=5)
+        # ---------- LOCAL WINDOW (LAST 20 FRAMES) ----------
+        local_traj, = ax_local.plot([], [], "b-", lw=2, label="Last 20 poses")
+        map_scatter = ax_local.scatter([], [], s=6, c="black", alpha=0.4)
 
-        # ---- Orientation arrow ----
-        heading_arrow = FancyArrowPatch(
-            (0.0, 0.0),
-            (0.0, 0.0),
-            arrowstyle="->",
-            linewidth=2,
-            color="red",
-            mutation_scale=15,
-        )
-        ax.add_patch(heading_arrow)
-
-        # ---- 3D map points (x–z projection) ----
-        map_scatter = ax.scatter(
-            [], [],
-            s=6,
-            c="black",
-            alpha=0.4,
-            label="Map points (x–z)"
+        text_box = ax_local.text(
+            0.02, 0.98, "",
+            transform=ax_local.transAxes,
+            verticalalignment="top",
+            fontsize=10,
+            bbox=dict(facecolor="white", alpha=0.8)
         )
 
-        # ---- Formatting ----
-        ax.set_title("Ground Truth vs VO Estimated Trajectory")
-        ax.set_xlabel("x [m]")
-        ax.set_ylabel("y [m]")
-        ax.axis("equal")
-        ax.grid(True, linestyle="--", alpha=0.5)
-        ax.legend()
+        ax_local.set_title("Local window (x–z)")
+        ax_local.axis("equal")
+        ax_local.grid(True)
+        ax_local.legend()
 
-        ax.autoscale()
         plt.tight_layout()
         plt.show()
 
         return {
             "fig": fig,
-            "ax": ax,
+            "ax_global": ax_global,
+            "ax_local": ax_local,
             "est_line": est_line,
             "est_point": est_point,
             "heading_arrow": heading_arrow,
+            "local_traj": local_traj,
             "map_scatter": map_scatter,
+            "text_box": text_box,
             "arrow_len": arrow_len,
         }
-
-    def updateTrajectoryPlot(self, plot_state: Dict[str, object], est_path: np.ndarray, theta: float, pts3d: np.ndarray) -> None:
-        """
-        Update estimated trajectory and camera orientation arrow.
-
-        Args:
-            plot_state (dict): Plot state returned by initTrajectoryPlot
-            est_path (np.ndarray): Estimated path [k x 2]
-            theta (float): Current yaw angle (radians)
-        """
-        x = est_path[:, 0]
-        y = est_path[:, 1]
-
-
-        # Update trajectory
+    
+    def updateTrajectoryPlot(
+        self,
+        plot_state,
+        est_path: np.ndarray,
+        theta: float,
+        pts3d: np.ndarray,
+        n_keypoints: int,
+    ):
+        # ---------- GLOBAL ----------
+        x, y = est_path[:, 0], est_path[:, 1]
         plot_state["est_line"].set_data(x, y)
         plot_state["est_point"].set_data([x[-1]], [y[-1]])
 
-        # Update 3dpts
-        plot_state["map_scatter"].set_offsets(np.column_stack((pts3d[0, :], pts3d[2, :])))
-
-        # Update orientation arrow
         x0, y0 = x[-1], y[-1]
         L = plot_state["arrow_len"]
-        x1 = x0 + L * np.cos(theta)
-        y1 = y0 + L * np.sin(theta)
+        plot_state["heading_arrow"].set_positions(
+            (x0, y0),
+            (x0 + L * np.cos(theta), y0 + L * np.sin(theta))
+        )
 
-        plot_state["heading_arrow"].set_positions((x0, y0), (x1, y1))
+        # ---------- LOCAL (LAST 20 FRAMES) ----------
+        k = min(20, len(est_path))
+        x_loc = x[-k:]
+        y_loc = y[-k:]
+        plot_state["local_traj"].set_data(x_loc, y_loc)
+
+        if pts3d.size > 0:
+            plot_state["map_scatter"].set_offsets(
+                np.column_stack((pts3d[0, :], pts3d[2, :]))
+            )
+
+        # ---------- TEXT ----------
+        plot_state["text_box"].set_text(
+            f"Tracked keypoints: {n_keypoints}\n"
+            f"Map points: {pts3d.shape[1]}"
+        )
+
+        axl = plot_state["ax_local"]
+
+        # center on current pose (last point)
+        cx, cy = x_loc[-1], y_loc[-1]
+
+        # spread of recent motion around the center
+        dx = np.max(np.abs(x_loc - cx)) if k > 1 else 0.0
+        dy = np.max(np.abs(y_loc - cy)) if k > 1 else 0.0
+
+        # adaptive margin: tune constants to taste
+        m = max(5.0, 2.5 * max(dx, dy))
+
+        axl.set_xlim(cx - m, cx + m)
+        axl.set_ylim(cy - m, cy + m)
 
         plt.pause(0.001)
 
@@ -790,7 +820,7 @@ bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trac
 
 # calculate the homographic transformation between the first two keyframes
 homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.ransacHomography(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
-print(homography)
+
 # triangulate features from the first two keyframes to generate initial 3D point cloud
 bootstrap_point_cloud = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
 
@@ -800,9 +830,14 @@ print("Bootstrapped state")
 #print(S)
 
 # ploting setup
-plot_state = pipeline.initTrajectoryPlot(ground_truth)
 est_path = []
-theta = 0.0
+plot_state = pipeline.initTrajectoryPlot(ground_truth)
+R_cw = homography[:3, :3]
+t_cw = homography[:3, 3]
+R_wc = R_cw.T
+t_wc = - R_wc @ t_cw
+est_path.append([t_wc[0], t_wc[2]])
+theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
 
 # initialize previous image
 last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
@@ -846,23 +881,24 @@ for i in range(params.start_idx + 1, last_frame + 1):
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
 
     # plot current pose
-    R_wc = pose[:3, :3]
-    t_wc = pose[:3, 3]
-    R_cw = R_wc.T
-    t_cw = - R_cw @ t_wc
-    est_path.append([t_cw[0], t_cw[2]])
-    theta = scipy.spatial.transform.Rotation.from_matrix(R_cw).as_euler("xyz")[1]
-    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi, S["X"])
+    R_cw = pose[:3, :3]
+    t_cw = pose[:3, 3]
+    R_wc = R_cw.T
+    t_wc = - R_wc @ t_cw
+    est_path.append([t_wc[0], t_wc[2]])
+    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
+    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta, S["X"],S["P"].shape[0])
 
     # update last image
     last_image = image
 
     # debugging prints
-    print("***************************")
-    print(f"# Keypoints Tracked: {last_features.shape[0]}\n# Candidates Tracked: {last_candidates.shape[0]}\n# Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n# New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
+    if last_features[inliers_idx].shape[0] < 50:
+        print("***************************")
+        print(f"# Keypoints Tracked: {last_features.shape[0]}\n# Candidates Tracked: {last_candidates.shape[0]}\n# Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n# New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
 
     # pause for 0.01 seconds
-    cv2.imshow("tracking...", last_image)
+    cv2.imshow("tracking...", img_to_show)
     cv2.waitKey(10)
 
 cv2.destroyAllWindows()
