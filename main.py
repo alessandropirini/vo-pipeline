@@ -13,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 1
 
 # Define dataset paths
 # (Set these variables before running)
@@ -79,20 +79,23 @@ if DATASET == 0:
     
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     new_feature_min_squared_diff = 4
+    rows_roi_corners = 2
+    cols_roi_corners = 4
 
 elif DATASET == 1: 
-    feature_params = dict( maxCorners = 100,
-                        qualityLevel = 0.07,
-                        minDistance = 3,
-                        blockSize = 7 )
+    feature_params = dict( maxCorners = 60,
+                        qualityLevel = 0.05,
+                        minDistance = 10,
+                        blockSize = 9 )
 
     # Parameters for LKT
     lk_params = dict( winSize  = (21, 21),
                     maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     new_feature_min_squared_diff = 4
-
+    rows_roi_corners = 3
+    cols_roi_corners = 3
 
 
 # Next keyframe to use for bootstrapping
@@ -117,8 +120,13 @@ class VO_Params():
     k: np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    rows_roi_corners :int
+    cols_roi_corners :int
     abs_eig_min: float =1e-2
+    
+    
     # ADD NEW PARAMS HERE
+
     if DATASET == 0: 
         alpha: float = 0.02
     elif DATASET == 1: 
@@ -127,14 +135,12 @@ class VO_Params():
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
-        self.feature_masks = self.get_feature_masks(bs_kf_1, 2, 4)
+        self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
         self.shi_tomasi_params = shi_tomasi_params
         self.klt_params = klt_params
         self.k = k
         self.start_idx = start_idx
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
-        
-        # ADD NEW PARAMS HERE
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -382,11 +388,6 @@ class Pipeline():
         pts_3D = state["X"]
         pts_3D = pts_3D.T # according to documentation we need them as kx3 not 3xk
         K = self.params.k
-        
-        # print("Shape of 2D points")
-        # print(pts_2D.shape)
-        # print("Shape of 3D points")
-        # print(pts_3D.shape)
 
         assert state["X"].shape[1] == state["P"].shape[0], "The number of 2D points does not match the number of 3D correspondencies"
 
@@ -637,37 +638,43 @@ class Pipeline():
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
 
-
-    def initTrajectoryPlot(self, gt_path: np.ndarray, arrow_len: float = 0.3):
+    
+    def initTrajectoryPlot(
+        self,
+        gt_path: np.ndarray,
+        arrow_len: float = 0.3,
+        first_flow_bgr: np.ndarray | None = None,
+        total_frames: int | None = None,
+    ):
         plt.ion()
-        fig, (ax_global, ax_local) = plt.subplots(1, 2, figsize=(14, 6))
+        fig = plt.figure(figsize=(18, 10))
+        gs = fig.add_gridspec(2, 3)
+        ax_flow   = fig.add_subplot(gs[0, :])   # <-- ONE axis, spans whole top
+        ax_kp     = fig.add_subplot(gs[1, 0])
+        ax_local  = fig.add_subplot(gs[1, 1])
+        ax_global = fig.add_subplot(gs[1, 2])
+
+        H, W = first_flow_bgr.shape[:2]
 
         # ---------- GLOBAL TRAJECTORY ----------
         if (gt_path is not None) and (DATASET in [0, 2]) and (len(gt_path) > 0):
             x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
-            
+            #ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
+
+            # start centered around GT extents
             xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
             ymin, ymax = float(np.min(y_gt)), float(np.max(y_gt))
-
             cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
 
-            # pad around GT extents; also enforce a minimum span
             pad = 10.0
-            min_span = 250.0
-
-            span_x = max(min_span, (xmax - xmin) + 2 * pad)
-            span_y = max(min_span, (ymax - ymin) + 2 * pad)
-            span = max(span_x, span_y)   # keep square view
-
+            span = max((xmax - xmin), (ymax - ymin)) + 2 * pad
+            span = max(span, 250.0)  # minimum view
             ax_global.set_xlim(cx - span / 2, cx + span / 2)
             ax_global.set_ylim(cy - span / 2, cy + span / 2)
-            points = np.stack((x_gt, y_gt), axis=1)
-            ax_global.plot(points[:, 0], points[:, 1], color="gray", lw=2, label="GT")
         else:
-            init_span = 250.0
-            ax_global.set_xlim(-init_span / 2, init_span / 2)
-            ax_global.set_ylim(-init_span / 2, init_span / 2)
-            
+            span = 250.0
+            ax_global.set_xlim(-span/2, span/2)
+            ax_global.set_ylim(-span/2, span/2)
 
         est_line, = ax_global.plot([], [], "r-", lw=2, label="VO")
         est_point, = ax_global.plot([], [], "ro")
@@ -684,42 +691,68 @@ class Pipeline():
         ax_global.grid(True)
         ax_global.legend()
 
-        # ---------- LOCAL WINDOW (LAST 20 FRAMES) ----------
+        # ---------- LOCAL TRAJECTORY ----------
         local_traj, = ax_local.plot([], [], "b-", lw=2, label="Last 20 poses")
         map_scatter = ax_local.scatter([], [], s=6, c="black", alpha=0.4)
-
-        text_box = ax_local.text(
-            0.02, 0.98, "",
-            transform=ax_local.transAxes,
-            verticalalignment="top",
-            fontsize=10,
-            bbox=dict(facecolor="white", alpha=0.8)
-        )
-
         ax_local.set_title("Local window (x-z)")
-        ax_local.axis("equal")
+        ax_local.set_aspect("equal", adjustable="box")
         ax_local.grid(True)
         ax_local.legend()
 
+        # ---------- OPTICAL FLOW IMAGE ----------
+        if first_flow_bgr is None:
+            # fallback placeholder
+            first_flow_rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+        else:
+            first_flow_rgb = cv2.cvtColor(first_flow_bgr, cv2.COLOR_BGR2RGB)
+
+        flow_im = ax_flow.imshow(first_flow_rgb)
+        ax_flow.set_axis_off()
+        # kflow pixel coordinate space
+        ax_flow.set_xlim(0, W)
+        ax_flow.set_ylim(H, 0)
+
+        # ---------- KEYPOINTS OVER TIME ----------
+        kp_line, = ax_kp.plot([], [], "-o", ms=3, lw=2, label="Tracked (P)")
+        inl_line, = ax_kp.plot([], [], "-o", ms=3, lw=2, label="Inliers (PnP)")
+        ax_kp.set_title("Keypoints over time")
+        ax_kp.set_xlabel("Frame")
+        ax_kp.set_ylabel("Count")
+        ax_kp.grid(True)
+        ax_kp.legend()
+
+        init_window = 50   # frames to show initially
+        ax_kp.set_xlim(0, init_window)
+
         plt.tight_layout()
         plt.show()
-        
 
         return {
             "fig": fig,
             "ax_global": ax_global,
             "ax_local": ax_local,
+            "ax_flow": ax_flow,
+            "ax_kp": ax_kp,
             "est_line": est_line,
             "est_point": est_point,
             "heading_arrow": heading_arrow,
             "local_traj": local_traj,
             "map_scatter": map_scatter,
-            "text_box": text_box,
+            "flow_im": flow_im,
+            "kp_line": kp_line,
+            "inl_line": inl_line,
             "arrow_len": arrow_len,
+            "frames": [],
+            "kp_hist": [],
+            "inl_hist": [],
+            "cand_hist": [],
+            "total_frames": total_frames,
+            # global bounds that expand only when needed
             "gxlim": list(ax_global.get_xlim()),
             "gylim": list(ax_global.get_ylim()),
         }
-    
+
+
     def updateTrajectoryPlot(
         self,
         plot_state,
@@ -727,6 +760,9 @@ class Pipeline():
         theta: float,
         pts3d: np.ndarray,
         n_keypoints: int,
+        flow_bgr: np.ndarray | None = None,
+        frame_idx: int | None = None,
+        n_inliers: int | None = None,
     ):
         # ---------- GLOBAL ----------
         x, y = est_path[:, 0], est_path[:, 1]
@@ -739,91 +775,82 @@ class Pipeline():
             (x0, y0), (x0 + L*np.cos(theta), y0 + L*np.sin(theta))
         )
 
+        # expand global limits only when needed (no recenter)
         axg = plot_state["ax_global"]
         xmin, xmax = plot_state["gxlim"]
         ymin, ymax = plot_state["gylim"]
-
         span_x = xmax - xmin
         span_y = ymax - ymin
 
-        # padding relative to current span (and with a floor)
-        pad_frac = 0.08
-        pad_x = max(5.0, pad_frac * span_x)
-        pad_y = max(5.0, pad_frac * span_y)
+        pad_x = max(10.0, 0.08 * span_x)
+        pad_y = max(10.0, 0.08 * span_y)
 
         changed = False
-
-        # extend only the side that is hit (no recenter, no multiplication)
         if x0 < xmin + pad_x:
-            xmin = x0 - pad_x
-            changed = True
+            xmin = x0 - pad_x; changed = True
         elif x0 > xmax - pad_x:
-            xmax = x0 + pad_x
-            changed = True
-
+            xmax = x0 + pad_x; changed = True
         if y0 < ymin + pad_y:
-            ymin = y0 - pad_y
-            changed = True
+            ymin = y0 - pad_y; changed = True
         elif y0 > ymax - pad_y:
-            ymax = y0 + pad_y
-            changed = True
-
-        # optional: enforce a minimum span so it never starts too tight
-        min_span = 250.0
-        span_x2 = xmax - xmin
-        span_y2 = ymax - ymin
-        if span_x2 < min_span:
-            extra = 0.5 * (min_span - span_x2)
-            xmin -= extra; xmax += extra
-            changed = True
-        if span_y2 < min_span:
-            extra = 0.5 * (min_span - span_y2)
-            ymin -= extra; ymax += extra
-            changed = True
+            ymax = y0 + pad_y; changed = True
 
         if changed:
             axg.set_xlim(xmin, xmax)
             axg.set_ylim(ymin, ymax)
             plot_state["gxlim"] = [xmin, xmax]
             plot_state["gylim"] = [ymin, ymax]
-        # ---------- LOCAL (LAST 20 FRAMES) ----------
+
+        # ---------- LOCAL ----------
         k = min(20, len(est_path))
         x_loc = x[-k:]
         y_loc = y[-k:]
         plot_state["local_traj"].set_data(x_loc, y_loc)
 
         if pts3d.size > 0:
-            plot_state["map_scatter"].set_offsets(
-                np.column_stack((pts3d[0, :], pts3d[2, :]))
-            )
-
-        # ---------- TEXT ----------
-        plot_state["text_box"].set_text(
-            f"Tracked keypoints: {n_keypoints}\n"
-            f"Map points: {pts3d.shape[1]}"
-        )
+            plot_state["map_scatter"].set_offsets(np.column_stack((pts3d[0, :], pts3d[2, :])))
 
         axl = plot_state["ax_local"]
-
-        # center on current pose (last point)
         cx, cy = x_loc[-1], y_loc[-1]
-
-        # spread of recent motion around the center
         dx = np.max(np.abs(x_loc - cx)) if k > 1 else 0.0
         dy = np.max(np.abs(y_loc - cy)) if k > 1 else 0.0
         d = max(dx, dy)
 
-        # --- zoom-in friendly margin ---
-        # small floor so the view doesn't collapse to a point,
-        # but no huge clamp that hides tiny motion
-        m_min = 0.01          # try 0.1–0.5 depending on your units
+        m_min = 0.05
         m = max(m_min, 3.0 * d)
-
-        # optional: cap if you don't want it to zoom out too much
-        m_max = 20.0
-        m = min(m, m_max)
+        m = min(m, 20.0)
         axl.set_xlim(cx - m, cx + m)
         axl.set_ylim(cy - m, cy + m)
+
+        # ---------- OPTICAL FLOW IMAGE ----------
+        if flow_bgr is not None:
+            plot_state["flow_im"].set_data(cv2.cvtColor(flow_bgr, cv2.COLOR_BGR2RGB))
+
+        # ---------- KEYPOINT TIME SERIES ----------
+        if frame_idx is not None:
+            plot_state["frames"].append(len(plot_state["frames"]))
+            plot_state["kp_hist"].append(int(n_keypoints))
+            plot_state["inl_hist"].append(int(n_inliers) if n_inliers is not None else np.nan)
+            
+            f = plot_state["frames"]
+            plot_state["kp_line"].set_data(f, plot_state["kp_hist"])
+            plot_state["inl_line"].set_data(f, plot_state["inl_hist"])
+
+            axk = plot_state["ax_kp"]
+            x_now = f[-1]
+            xmin, xmax = axk.get_xlim()
+            if x_now > xmax:
+                axk.set_xlim(xmin, x_now + 10)
+            
+            axk.relim()
+            axk.autoscale_view(scaley=True, scalex=False)
+
+            # frame counter in the title bar
+            tot = plot_state.get("total_frames", None)
+            if tot is None:
+                plot_state["fig"].suptitle(f"Frame {frame_idx}")
+            else:
+                plot_state["fig"].suptitle(f"Frame {frame_idx} / {tot}")
 
         plt.pause(0.001)
 
@@ -948,7 +975,15 @@ print("Bootstrapped state")
 
 # ploting setup
 est_path = []
-plot_state = pipeline.initTrajectoryPlot(ground_truth)
+# initialize previous image
+last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
+
+# first “flow” image to show (just grayscale -> bgr)
+first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
+
+total_frames = last_frame - params.start_idx
+plot_state = pipeline.initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames)
+
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
@@ -956,17 +991,15 @@ t_wc = - R_wc @ t_cw
 est_path.append([t_wc[0], t_wc[2]])
 theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
 
-# initialize previous image
-last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
-cv2.imshow("tracking...", last_image)
-
 #Initialize candidate set with the second keyframe
 potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
+frame_counter = params.start_idx +1
 
-for i in range(params.start_idx + 1, last_frame + 1):
+for i in range(params.start_idx + 1, last_frame):
+    frame_counter+=1
     # read in next image
     image_path = images[i]
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -996,7 +1029,8 @@ for i in range(params.start_idx + 1, last_frame + 1):
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
-
+    n_inliers = len(inliers_idx)
+    n_candidates = S["C"].shape[0]
     # plot current pose
     R_cw = pose[:3, :3]
     t_cw = pose[:3, 3]
@@ -1004,7 +1038,18 @@ for i in range(params.start_idx + 1, last_frame + 1):
     t_wc = - R_wc @ t_cw
     est_path.append([t_wc[0], t_wc[2]])
     theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
-    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta, S["X"],S["P"].shape[0])
+    
+    pipeline.updateTrajectoryPlot(
+        plot_state, 
+        np.asarray(est_path), 
+        theta, 
+        S["X"],
+        S["P"].shape[0], 
+        flow_bgr=img_to_show,
+        frame_idx=frame_counter,
+        n_inliers=n_inliers,
+    )
+
 
     # update last image
     last_image = image
@@ -1015,7 +1060,7 @@ for i in range(params.start_idx + 1, last_frame + 1):
         print(f"# Keypoints Tracked: {last_features.shape[0]}\n# Candidates Tracked: {last_candidates.shape[0]}\n# Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n# New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
 
     # pause for 0.01 seconds
-    cv2.imshow("tracking...", img_to_show)
-    cv2.waitKey(10)
+    # cv2.imshow("tracking...", img_to_show)
+    # cv2.waitKey(10)
 
 cv2.destroyAllWindows()
