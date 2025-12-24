@@ -67,15 +67,15 @@ else:
 
 # Paramaters for Shi-Tomasi corners
 if DATASET == 0: 
-    feature_params = dict( maxCorners = 150,
-                        qualityLevel = 0.05,
-                        minDistance = 5,
+    feature_params = dict( maxCorners = 60,
+                        qualityLevel = 0.01,
+                        minDistance = 13,
                         blockSize = 7)
 
     # Parameters for LKT
     lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+                    maxLevel = 4,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
     
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     new_feature_min_squared_diff = 5
@@ -127,7 +127,7 @@ class VO_Params():
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
-        self.feature_masks = self.get_feature_masks(bs_kf_1, 3, 3)
+        self.feature_masks = self.get_feature_masks(bs_kf_1, 2, 4)
         self.shi_tomasi_params = shi_tomasi_params
         self.klt_params = klt_params
         self.k = k
@@ -440,7 +440,6 @@ class Pipeline():
         m = pts_2D_cur.shape[0]
         if pts_2D_first_obs.shape[0] != m: 
             print("ERROR in shapes of tracked keypoints")
-        # print(f"2d_cur shape: {pts_2D_cur.shape}\n2d_first shape: {pts_2D_first_obs.shape}\n")
 
         pts_2D_cur_hom = np.column_stack((pts_2D_cur, np.ones(m)))
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
@@ -644,10 +643,31 @@ class Pipeline():
         fig, (ax_global, ax_local) = plt.subplots(1, 2, figsize=(14, 6))
 
         # ---------- GLOBAL TRAJECTORY ----------
-        if DATASET in [0, 2] and gt_path is not None:
+        if (gt_path is not None) and (DATASET in [0, 2]) and (len(gt_path) > 0):
             x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
+            
+            xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
+            ymin, ymax = float(np.min(y_gt)), float(np.max(y_gt))
+
+            cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
+
+            # pad around GT extents; also enforce a minimum span
+            pad = 10.0
+            min_span = 250.0
+
+            span_x = max(min_span, (xmax - xmin) + 2 * pad)
+            span_y = max(min_span, (ymax - ymin) + 2 * pad)
+            span = max(span_x, span_y)   # keep square view
+
+            ax_global.set_xlim(cx - span / 2, cx + span / 2)
+            ax_global.set_ylim(cy - span / 2, cy + span / 2)
             points = np.stack((x_gt, y_gt), axis=1)
             ax_global.plot(points[:, 0], points[:, 1], color="gray", lw=2, label="GT")
+        else:
+            init_span = 250.0
+            ax_global.set_xlim(-init_span / 2, init_span / 2)
+            ax_global.set_ylim(-init_span / 2, init_span / 2)
+            
 
         est_line, = ax_global.plot([], [], "r-", lw=2, label="VO")
         est_point, = ax_global.plot([], [], "ro")
@@ -660,7 +680,7 @@ class Pipeline():
         ax_global.add_patch(heading_arrow)
 
         ax_global.set_title("Global trajectory")
-        ax_global.axis("equal")
+        ax_global.set_aspect("equal", adjustable="box")
         ax_global.grid(True)
         ax_global.legend()
 
@@ -676,16 +696,14 @@ class Pipeline():
             bbox=dict(facecolor="white", alpha=0.8)
         )
 
-        ax_local.set_title("Local window (x–z)")
+        ax_local.set_title("Local window (x-z)")
         ax_local.axis("equal")
         ax_local.grid(True)
         ax_local.legend()
-        # start zoomed-out on the global plot
-        ax_global.set_aspect("equal", adjustable="box")
-        ax_global.set_xlim(-50, 50)
-        ax_global.set_ylim(-50, 50)
+
         plt.tight_layout()
         plt.show()
+        
 
         return {
             "fig": fig,
@@ -698,6 +716,8 @@ class Pipeline():
             "map_scatter": map_scatter,
             "text_box": text_box,
             "arrow_len": arrow_len,
+            "gxlim": list(ax_global.get_xlim()),
+            "gylim": list(ax_global.get_ylim()),
         }
     
     def updateTrajectoryPlot(
@@ -708,50 +728,64 @@ class Pipeline():
         pts3d: np.ndarray,
         n_keypoints: int,
     ):
-        # ---------- GLOBAL (SLIDING WINDOW) ----------
+        # ---------- GLOBAL ----------
         x, y = est_path[:, 0], est_path[:, 1]
+        plot_state["est_line"].set_data(x, y)
+        plot_state["est_point"].set_data([x[-1]], [y[-1]])
 
-        # show only last kG poses on the global axis
-        kG = min(1000, len(x))          # choose window length
-        xg = x[-kG:]
-        yg = y[-kG:]
-
-        plot_state["est_line"].set_data(xg, yg)
-        plot_state["est_point"].set_data([xg[-1]], [yg[-1]])
-
-        # heading arrow at current pose
-        x0, y0 = xg[-1], yg[-1]
+        x0, y0 = float(x[-1]), float(y[-1])
         L = plot_state["arrow_len"]
         plot_state["heading_arrow"].set_positions(
-            (x0, y0),
-            (x0 + L * np.cos(theta), y0 + L * np.sin(theta))
+            (x0, y0), (x0 + L*np.cos(theta), y0 + L*np.sin(theta))
         )
 
-        # set visible window (margin in meters)
         axg = plot_state["ax_global"]
-        
-        axg = plot_state["ax_global"]
+        xmin, xmax = plot_state["gxlim"]
+        ymin, ymax = plot_state["gylim"]
 
-        margin = 10.0
-        min_span = 80.0   # <- ensures you start zoomed-out (meters)
+        span_x = xmax - xmin
+        span_y = ymax - ymin
 
-        xmin, xmax = float(np.min(xg)), float(np.max(xg))
-        ymin, ymax = float(np.min(yg)), float(np.max(yg))
+        # padding relative to current span (and with a floor)
+        pad_frac = 0.08
+        pad_x = max(5.0, pad_frac * span_x)
+        pad_y = max(5.0, pad_frac * span_y)
 
-        # current pose
-        cxg, cyg = float(xg[-1]), float(yg[-1])
+        changed = False
 
-        span_x = max(min_span, (xmax - xmin) + 2 * margin)
-        span_y = max(min_span, (ymax - ymin) + 2 * margin)
+        # extend only the side that is hit (no recenter, no multiplication)
+        if x0 < xmin + pad_x:
+            xmin = x0 - pad_x
+            changed = True
+        elif x0 > xmax - pad_x:
+            xmax = x0 + pad_x
+            changed = True
 
-        axg.set_xlim(cxg - span_x / 2, cxg + span_x / 2)
-        axg.set_ylim(cyg - span_y / 2, cyg + span_y / 2)
-        L = plot_state["arrow_len"]
-        plot_state["heading_arrow"].set_positions(
-            (x0, y0),
-            (x0 + L * np.cos(theta), y0 + L * np.sin(theta))
-        )
+        if y0 < ymin + pad_y:
+            ymin = y0 - pad_y
+            changed = True
+        elif y0 > ymax - pad_y:
+            ymax = y0 + pad_y
+            changed = True
 
+        # optional: enforce a minimum span so it never starts too tight
+        min_span = 250.0
+        span_x2 = xmax - xmin
+        span_y2 = ymax - ymin
+        if span_x2 < min_span:
+            extra = 0.5 * (min_span - span_x2)
+            xmin -= extra; xmax += extra
+            changed = True
+        if span_y2 < min_span:
+            extra = 0.5 * (min_span - span_y2)
+            ymin -= extra; ymax += extra
+            changed = True
+
+        if changed:
+            axg.set_xlim(xmin, xmax)
+            axg.set_ylim(ymin, ymax)
+            plot_state["gxlim"] = [xmin, xmax]
+            plot_state["gylim"] = [ymin, ymax]
         # ---------- LOCAL (LAST 20 FRAMES) ----------
         k = min(20, len(est_path))
         x_loc = x[-k:]
@@ -777,10 +811,17 @@ class Pipeline():
         # spread of recent motion around the center
         dx = np.max(np.abs(x_loc - cx)) if k > 1 else 0.0
         dy = np.max(np.abs(y_loc - cy)) if k > 1 else 0.0
+        d = max(dx, dy)
 
-        # adaptive margin: tune constants to taste
-        m = max(5.0, 2.5 * max(dx, dy))
+        # --- zoom-in friendly margin ---
+        # small floor so the view doesn't collapse to a point,
+        # but no huge clamp that hides tiny motion
+        m_min = 0.01          # try 0.1–0.5 depending on your units
+        m = max(m_min, 3.0 * d)
 
+        # optional: cap if you don't want it to zoom out too much
+        m_max = 20.0
+        m = min(m, m_max)
         axl.set_xlim(cx - m, cx + m)
         axl.set_ylim(cy - m, cy + m)
 
