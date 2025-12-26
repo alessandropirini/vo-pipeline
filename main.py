@@ -13,14 +13,14 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 3
 
 # Define dataset paths
 # (Set these variables before running)
 kitti_path = "kitti/kitti05/kitti"
 malaga_path = "malaga/malaga-urban-dataset-extract-07"
 parking_path = "parking/parking"
-# own_dataset_path = "/path/to/own_dataset"
+own_dataset_path = "VAMR_Rome_dataset"
 
 if DATASET == 0:
     assert 'kitti_path' in locals(), "You must define kitti_path"
@@ -61,6 +61,15 @@ elif DATASET == 3:
     # Own Dataset
     # TODO: define your own dataset and load K obtained from calibration of own camera
     assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
+    img_dir=os.path.join(own_dataset_path, 'images')
+    images = sorted(glob(os.path.join(img_dir, '*.png')))
+    last_frame = len(images)
+    K = np.array([
+        [1.05903465e+03, 0.00000000e+00, 6.29060709e+02],
+        [0.00000000e+00, 1.06306400e+03, 3.28563696e+02],
+        [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]
+    ])
+    ground_truth = None
 
 else:
     raise ValueError("Invalid dataset index")
@@ -88,6 +97,20 @@ elif DATASET == 1:
                         minDistance = 10,
                         blockSize = 9 )
 
+    # Parameters for LKT
+    lk_params = dict( winSize  = (21, 21),
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    new_feature_min_squared_diff = 4
+    rows_roi_corners = 3
+    cols_roi_corners = 3
+
+elif DATASET == 3: 
+    feature_params = dict( maxCorners = 60,
+                        qualityLevel = 0.05,
+                        minDistance = 10,
+                        blockSize = 9 )
     # Parameters for LKT
     lk_params = dict( winSize  = (21, 21),
                     maxLevel = 2,
@@ -130,6 +153,8 @@ class VO_Params():
     if DATASET == 0: 
         alpha: float = 0.02
     elif DATASET == 1: 
+        alpha :float = 0.02
+    elif DATASET == 3: 
         alpha :float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
@@ -198,6 +223,10 @@ elif DATASET == 3:
     # Own Dataset
     # TODO: define your own dataset and load K obtained from calibration of own camera
     assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
+    bs_kf_1 = images[0]
+    bs_kf_2 = images[CUSTOM_BS_KF]
+    start_idx = CUSTOM_BS_KF
+    # ADD NEW PARAMS HERE
 
 else:
     raise ValueError("Invalid dataset index")
@@ -264,7 +293,7 @@ class Pipeline():
         # Keep only points that were successfully tracked throughout
         return initial_points[still_detected], points[still_detected]
 
-    def ransacHomography(self, points1, points2):
+    def findRelativePose(self, points1, points2):
         #F mat using ransac
         fundamental_matrix, inliers =cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
 
@@ -660,7 +689,7 @@ bootstrap_features_kf_1 = pipeline.extractFeaturesBootstrap()
 bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trackForwardBootstrap(bootstrap_features_kf_1)
 
 # calculate the homographic transformation between the first two keyframes
-homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.ransacHomography(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
+homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.findRelativePose(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
 
 # triangulate features from the first two keyframes to generate initial 3D point cloud
 bootstrap_point_cloud = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
