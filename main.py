@@ -329,7 +329,7 @@ class Pipeline():
 
         return S
 
-    def trackForward(self, params: VO_Params, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
+    def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
         """
         Track 2D keypoints from img_1 to img_2 using KLT optical flow
 
@@ -1008,7 +1008,7 @@ for i in range(params.start_idx + 1, last_frame):
         continue
 
     # track keypoints forward one frame
-    S, last_features, last_candidates = pipeline.trackForward(params, S, last_image, image)
+    S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
     
     # plot tracked keypoints (pre-ransac) and candidate keypoints
     img_to_show = pipeline.draw_optical_flow(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), last_features, S["P"], (255, 0, 0), 1, .15)
