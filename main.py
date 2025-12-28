@@ -163,9 +163,7 @@ class VO_Params():
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     rows_roi_corners : int
     cols_roi_corners : int
-    abs_eig_min : float = 1e-2
-    use_sliding_BA : bool = False
-    
+    abs_eig_min : float = 1e-2    
     
     # ADD NEW PARAMS HERE
     # NOTE if they are all the same just avoid all this block of code
@@ -178,7 +176,7 @@ class VO_Params():
     elif DATASET == 3: 
         alpha : float = 0.02
 
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, use_sliding_BA, window_size):
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
         self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
@@ -189,7 +187,6 @@ class VO_Params():
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
         self.rows_roi_corners = rows_roi_corners
         self.cols_roi_corners = cols_roi_corners
-        self.use_sliding_BA = use_sliding_BA
         self.window_size = window_size
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
@@ -258,14 +255,15 @@ else:
 
 
 # The following boolean is to activate or de-activate the BA feature
-use_sliding_BA : bool = False
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, use_sliding_BA, window_size)
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 class Pipeline():
 
     params: VO_Params
 
     def __init__(self, params: VO_Params):
         self.params = params
+        self.use_sliding_BA : bool = False 
+        self.next_id : int = 0  # this parameter is only used for sliding BA and is used to keep track of landmarks through operation (cause landmarks might decrease/increase)
 
     
     def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
@@ -335,7 +333,7 @@ class Pipeline():
         for i in range(img_bs_kf_1_index, img_bs_kf_2_index):
             current_image=cv2.imread(images[i],cv2.IMREAD_GRAYSCALE)
             next_image=cv2.imread(images[i+1],cv2.IMREAD_GRAYSCALE)
-            nextPts,status,error=cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
+            nextPts, status, _=cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
             points=nextPts
             status=status.flatten()
             still_detected=still_detected & (status==1)
@@ -405,7 +403,7 @@ class Pipeline():
                 X_i: 3xk matrix containing the 3D projections of the keypoints
             
             Returns:
-                dictionary of dictionaries, where every variable of interest is a key and its value is the matrix (e.g. S["P"] returns a kx1x2 matrix of keypoints)  
+                dictionary where every variable of interest is a key and its value is the matrix (e.g. S["P"] returns a kx1x2 matrix of keypoints)  
         """
         S : dict[str : np.ndarray] = {}
         assert P_i.shape[0] == X_i.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
@@ -416,17 +414,17 @@ class Pipeline():
         S["F"] = np.empty_like(S["C"])
         S["T"] = np.empty((0,12))
 
-        if self.params.use_sliding_BA:
+        if self.use_sliding_BA:
+            n_pts = X_i.shape(1) # we get the landmark number
+            S["ids"] = np.arange(n_pts)     # initialize this as the range going from 0 to n_pts-1
+            self.next_id = n_pts
             # only created if we are using BA
             S["P_history"] = deque(maxlen=self.params.window_size)
-            S["P_history"].append(P_i)   # this is a list of kx1x2 keypoints
-            
-            S["X_history"] = deque(maxlen=self.params.window_size)
-            S["X_history"].append(X_i)
+            S["P_history"].append((P_i.copy(), S["ids"].copy()))   # this is a list of tuples containing kx1x2 keypoints and the IDs associated to the landmarks for tracking through frames
             
             S["pose_history"] = deque(maxlen=self.params.window_size)
-            S["pose_history"].append(np.hstack(np.eye(3,3), np.zeros(3,1))) # frame zero
-            # should I also add frame 2 using the estimated pose we got earlier?
+            S["pose_history"].append(np.hstack(np.eye(3), np.zeros(3,1))) # frame zero, so the origin
+            # should I also add frame 2 using the estimated pose we got earlier? I think so since otherwise we are never adding that, right? check if the first frames get skipped
         return S
 
     def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
@@ -453,10 +451,10 @@ class Pipeline():
         state["P"] = current_points[status == 1]
         state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
         
-        if self.params.use_sliding_BA:
-            state["P_history"].append(state["P"])  # append the new keypoints
-            state["X_history"].append(state["X"])
-
+        if self.use_sliding_BA:
+            state["ids"] = state["ids"][status == 1]    # filter new ids
+            state["P_history"].append((state["P"].copy(), state["ids"].copy()))  # append the new keypoints
+            
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
         candidates = self.as_lk_points(state["C"])
@@ -518,8 +516,8 @@ class Pipeline():
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
         
-        if self.params.use_sliding_BA:
-            new_state["pose_estimate"].append(T_w2c)
+        if self.use_sliding_BA:
+            new_state["pose_history"].append(T_w2c)
 
         return new_state, T_w2c, inliers_idx
     
@@ -616,6 +614,11 @@ class Pipeline():
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
             state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+j,1 ,2)
             state["X"] = np.concatenate((state["X"], valid_3d_pts), axis = 1) #(3, n+j)
+            
+            if self.use_sliding_BA:
+                new_ids = np.arange(self.next_id, self.next_id + valid_3d_pts.shape[1])     # get the new ids
+                state["ids"] = np.concatenate((state["ids"], new_ids))  # add them to the state
+                self.next_id += len(new_ids)    # update the next_id
         
         #Update the candidate set removing the now triangulated points 
         state["C"] = pts_2D_cur[not_idx, None, :]
@@ -736,110 +739,13 @@ class Pipeline():
     def sliding_window_refinement(self, S):
         """
         """
-        if not self.params.use_sliding_BA: return S        
+        if not self.use_sliding_BA: return S        
 
         window_keypoints = S["P_history"]
         window_landmarks = S["X_history"]
         pass
         
     
-    def compute_rep_err(self, x_vec, window_frames, obs_map):
-        """
-        Compute reprojection error for sliding window bundle adjustment
-        Args:
-            x_vec: 1D array of optimized parameters [poses_params, landmark_params]
-            obs_map: A dictionary mapping point_id to its 2D observations in the window
-        Returns:
-            residuals: 1D array of reprojection errors
-        """
-        # 1. Unpack x_vec into poses and 3D landmarks
-        poses, landmarks = self.unpack_params(x_vec, window_frames)
-        residuals = []
-
-        for f_id in window_frames:
-            pose = poses[f_id]
-            # Get only landmarks visible in this specific frame
-            visible_ids = obs_map[f_id]['ids']
-            observed_pixels = obs_map[f_id]['pixels']
-            
-            # Project our current estimate of these landmarks
-            projected = self.project_points(landmarks[:, visible_ids], pose)
-            
-            # Calculate distance between observation and projection
-            err = (observed_pixels - projected).flatten()
-            residuals.append(err)
-
-        return np.concatenate(residuals)
-    
-    def project_points(self, X, T):
-        """
-        Projects 3D points X into camera with pose T
-        Args:
-            X: (3, K) landmark coordinates
-            T: (3, 4) camera pose [R|t]
-        Returns:
-            pixels: (K, 2) projected pixel coordinates
-        """
-        # Transform to camera frame
-        X_hom = np.vstack((X, np.ones(X.shape[1])))
-        P_cam = T @ X_hom # (3, K)
-        
-        # Project to image plane
-        P_img = self.params.k @ P_cam
-        
-        # Points with Z <= 0 are behind the camera; we'll handle those in the residual
-        pixels = P_img[:2] / P_img[2]
-        return pixels.T # (K, 2)
-    
-
-    def pack_params(self, window_poses, window_landmarks):
-        """
-        Packs the window poses and landmarks into a single parameter vector for optimization.
-        Args:
-            window_poses: List of (3, 4) matrices in the sliding window
-            window_landmarks: (3, M) matrix of landmarks optimized in this window
-        Returns:
-            x_vec: 1D array of packed parameters
-        """
-        # We skip the first pose in the window to anchor the map (gauge freedom)
-        pose_params = []
-        for i in range(1, len(window_poses)):
-            R = window_poses[i][:, :3]
-            t = window_poses[i][:, 3]
-            rvec, _ = cv2.Rodrigues(R)
-            pose_params.append(np.hstack((rvec.flatten(), t.flatten())))
-        
-        # Flatten landmarks (3 * M)
-        landmark_params = window_landmarks.flatten()
-        
-        return np.concatenate((*pose_params, landmark_params))
-
-    def unpack_params(self, x_vec, window_poses, n_landmarks):
-        """
-        Unpacks the x_vec back into structured poses and landmarks.
-        Args:
-            x_vec: 1D array of packed parameters
-            window_poses: List of (3, 4) matrices in the sliding window
-            n_landmarks: Number of landmarks
-        Returns:
-            poses: Dictionary mapping frame index to (3, 4) pose matrix
-        """
-        n_active_poses = len(window_poses) - 1
-        poses = {0: window_poses[0]} # Fix the first pose as the anchor
-        
-        # Extract poses
-        for i in range(n_active_poses):
-            idx = i * 6
-            rvec = x_vec[idx:idx+3]
-            t = x_vec[idx+3:idx+6]
-            R, _ = cv2.Rodrigues(rvec)
-            poses[i+1] = np.hstack((R, t.reshape(3, 1)))
-            
-        # Extract landmarks
-        l_start = n_active_poses * 6
-        landmarks = x_vec[l_start:].reshape(3, n_landmarks)
-        
-        return poses, landmarks
     
 
 
