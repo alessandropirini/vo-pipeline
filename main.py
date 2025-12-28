@@ -10,6 +10,7 @@ from scipy.optimize import least_squares
 from collections import deque
 
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
+from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
 DATASET = 0
 
@@ -105,7 +106,7 @@ elif DATASET == 1:
     cols_roi_corners = 3
     window_size = 10
     
-# TODO tune this dataset correctly the following code is just a dummy placeholder block
+# TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
 elif DATASET == 2: 
     feature_params = dict( maxCorners = 60,
                         qualityLevel = 0.05,
@@ -260,9 +261,9 @@ class Pipeline():
 
     params: VO_Params
 
-    def __init__(self, params: VO_Params):
+    def __init__(self, params: VO_Params, use_sliding_window_BA: bool = False):
         self.params = params
-        self.use_sliding_BA : bool = False 
+        self.use_sliding_BA : bool = use_sliding_window_BA  # whether we want to use sliding_window BA or not, by default, it's false
         self.next_id : int = 0  # this parameter is only used for sliding BA and is used to keep track of landmarks through operation (cause landmarks might decrease/increase)
 
     
@@ -324,19 +325,19 @@ class Pipeline():
             initial_points[still_detected] (np.ndarray): (N,1,2) points in bs_kf_1 that were tracked to the next keyframe.
             points[still_detected] (np.ndarray): (M,1,2) tracked points in bs_kf_2.
         """
-        img_bs_kf_1_index=images.index(self.params.bs_kf_1)
-        img_bs_kf_2_index=images.index(self.params.bs_kf_2)
-        still_detected=np.ones(st_corners_kf_1.shape[0],dtype=bool)
-        points = self.as_lk_points(st_corners_kf_1.copy())
+        img_bs_kf_1_index = images.index(self.params.bs_kf_1)
+        img_bs_kf_2_index = images.index(self.params.bs_kf_2)
+        still_detected = np.ones(st_corners_kf_1.shape[0],dtype=bool)
+        points = as_lk_points(st_corners_kf_1.copy())
         initial_points = st_corners_kf_1.copy()
         #Track keypoints frame-by-frame from first bs frame to second bs frame
         for i in range(img_bs_kf_1_index, img_bs_kf_2_index):
-            current_image=cv2.imread(images[i],cv2.IMREAD_GRAYSCALE)
-            next_image=cv2.imread(images[i+1],cv2.IMREAD_GRAYSCALE)
-            nextPts, status, _=cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
-            points=nextPts
-            status=status.flatten()
-            still_detected=still_detected & (status==1)
+            current_image = cv2.imread(images[i],cv2.IMREAD_GRAYSCALE)
+            next_image = cv2.imread(images[i+1],cv2.IMREAD_GRAYSCALE)
+            nextPts, status, _ = cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
+            points = nextPts
+            status = status.flatten()
+            still_detected = still_detected & (status==1)
 
         # Keep only points that were successfully tracked throughout
         return initial_points[still_detected], points[still_detected]
@@ -353,16 +354,16 @@ class Pipeline():
             np.ndarray: (M,1,2) inlier keypoints in bs_kf_2.
         """
         #F mat using ransac
-        fundamental_matrix, inliers =cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
+        fundamental_matrix, inliers = cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
 
         #using boolean vector
         inliers = inliers.ravel().astype(bool)
 
         #compute the essential matrix
-        E= K.T@ fundamental_matrix@K
+        E= K.T @ fundamental_matrix@K
 
         #recover the relative camera pose
-        _,R,t,_=cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        _,R,t,_ = cv2.recoverPose(E,points1[inliers],points2[inliers],K)
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
@@ -441,7 +442,7 @@ class Pipeline():
             np.ndarray: candidate keypoints from the previous frame that were successfully tracked forward
         """
         # FIRST WE TRACK "ESTABILISHED KEYPOINTS"
-        points_2D = self.as_lk_points(state["P"])
+        points_2D = as_lk_points(state["P"])
         assert points_2D.shape[0] > 0, "There are no keypoints here, we can't track them forward"    
 
         current_points, status, _ = cv2.calcOpticalFlowPyrLK(prevImg=img_1, nextImg=img_2, prevPts=points_2D, nextPts=None, **self.params.klt_params)
@@ -457,7 +458,7 @@ class Pipeline():
             
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
-        candidates = self.as_lk_points(state["C"])
+        candidates = as_lk_points(state["C"])
         if candidates.shape[0] != 0:
             assert candidates.dtype == np.float32
             assert candidates.ndim == 3 and candidates.shape[1:] == (1, 2)
@@ -549,8 +550,8 @@ class Pipeline():
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
         K = params.k
         K_inv = np.linalg.inv(K)
-        n_pts_2D_cur = K_inv@pts_2D_cur_hom.T #(3,m)
-        n_pts_2D_first_obs = K_inv@pts_2D_first_obs_hom.T #(3,m)
+        n_pts_2D_cur = K_inv @ pts_2D_cur_hom.T #(3,m)
+        n_pts_2D_first_obs = K_inv @ pts_2D_first_obs_hom.T #(3,m)
         
         first_poses_mat = state["T"].copy()  #flattened on C order (m,12)
         first_poses_mat_tensor = first_poses_mat.reshape(m, 3, 4) #(m,3,4)
@@ -601,7 +602,7 @@ class Pipeline():
         for i, g in enumerate(groups):
 
             c_1_pose = unique_poses[i].reshape(3,4)
-            proj_1 = K@c_1_pose
+            proj_1 = K @ c_1_pose
             valid_pts_1 = valid_pts_2D_first[g].T #(2,k)
             valid_pts_2 = valid_pts_2D_cur[g].T #(2,k)
             points_homo = cv2.triangulatePoints(proj_1, proj_2, valid_pts_1, valid_pts_2)
@@ -613,7 +614,7 @@ class Pipeline():
             pixel_coords = valid_pts_2[:, mask].T  #(j,2)
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
             state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+j,1 ,2)
-            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis = 1) #(3, n+j)
+            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis=1) #(3, n+j)
             
             if self.use_sliding_BA:
                 new_ids = np.arange(self.next_id, self.next_id + valid_3d_pts.shape[1])     # get the new ids
@@ -718,39 +719,71 @@ class Pipeline():
         S_new["F"] = np.vstack((S["F"], new_features))
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
-
-    
-    @staticmethod
-    def as_lk_points(x: np.ndarray) -> np.ndarray:
-        """
-        Convert keypoints to OpenCV LK format:
-        (N,1,2), float32, contiguous
-        """
-        if x.size == 0:
-            return np.empty((0, 1, 2), dtype=np.float32)
-
-        if x.ndim == 2 and x.shape[1] == 2:
-            x = x[:, None, :]
-
-        return np.ascontiguousarray(x, dtype=np.float32)
     
 
-
-    def sliding_window_refinement(self, S):
+    def sliding_window_refinement(self, S: dict) -> dict:
         """
+        Perform sliding window bundle adjustment to refine camera poses and 3D landmarks in the current window.
+        Args:
+            S (dict): current state containing pose history, landmark history, and observations.
+        Returns:
+            dict: updated state with refined poses and landmarks.
         """
-        if not self.use_sliding_BA: return S        
+        # Check if BA is enabled and window is full, but we could also start when we have like 5 or 6 (that is a minimal change though, especially since drift grows with time, so if we start later it is ok)
+        if not self.params.use_sliding_BA or len(S["pose_history"]) < self.params.window_size:
+            return S
 
-        window_keypoints = S["P_history"]
-        window_landmarks = S["X_history"]
-        pass
+        # We only optimize landmarks that are currently in our 'Established' set (S["X"])
+        active_ids = S["ids"]
+        id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
+        n_landmarks = len(active_ids)
+        window_poses = list(S["pose_history"])
+        
+        # Build a flat list of all 2D observations in the window
+        obs_list = [] # List of (pose_index, landmark_index)
+        obs_pixels = []
+        
+        for f_idx, (pixels, ids) in enumerate(S["obs_history"]):
+            for p, id_ in zip(pixels, ids):
+                if id_ in id_to_idx:
+                    obs_list.append((f_idx, id_to_idx[id_]))
+                    obs_pixels.append(p[0]) # Extract (u, v)
+        
+        obs_pixels = np.array(obs_pixels)
+
+        # Pack variables and Sparsity Mask
+        x0 = pack_params(window_poses, S["X"])
+        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list)  # needed for scipy least square
+
+        # Huber norm is used to ignore KLT tracking outliers
+        res = least_squares(
+            compute_rep_err, x0, 
+            jac_sparsity=A,
+            args=(len(window_poses), n_landmarks, obs_list, obs_pixels),
+            loss='huber', f_scale=1.0, method='trf', ftol=1e-3
+        )
+
+        # Update State with Refined Values
+        new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
+        
+        # Update current state
+        S["X"] = new_X  # refined landmarks
+        current_pose = list(new_poses.values())[-1]
+        S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
+
+        # Update history deques with refined values
+        for i in range(len(S["pose_history"])):
+            S["pose_history"][i] = new_poses[i]
+            
+        return S
         
     
     
 
 
 # Create instance of pipeline
-pipeline = Pipeline(params)
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
+pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
 # extract features from the first image of the dataset
 bootstrap_features_kf_1 = pipeline.extractFeaturesBootstrap()

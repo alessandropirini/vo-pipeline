@@ -4,6 +4,20 @@ import cv2
 from scipy.sparse import lil_matrix
 
 
+def as_lk_points(x: np.ndarray) -> np.ndarray:
+        """
+        Convert keypoints to OpenCV LK format:
+        (N,1,2), float32, contiguous
+        """
+        if x.size == 0:
+            return np.empty((0, 1, 2), dtype=np.float32)
+
+        if x.ndim == 2 and x.shape[1] == 2:
+            x = x[:, None, :]
+
+        return np.ascontiguousarray(x, dtype=np.float32)
+
+
 def build_window_data(S: dict) -> tuple[int, list[tuple[int, int]], np.ndarray]:
     """
     Build data structures for sliding window BA
