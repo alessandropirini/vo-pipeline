@@ -14,7 +14,7 @@ from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 3
 
 # Next keyframe to use for bootstrapping
 KITTI_BS_KF = 3
@@ -490,7 +490,7 @@ class Pipeline():
 
         if not success:
             print("Pose estimation failed")
-            return ({}, np.zeros((3,4))) # maybe we could raise an error instead of returning this
+            return ({}, np.zeros((3,4)), np.empty((0,0))) # maybe we could raise an error instead of returning this
         
         # r_vec needs to be converted into a 3x3
         R, _ = cv2.Rodrigues(r_vec)    
@@ -723,29 +723,41 @@ class Pipeline():
         active_ids = S["ids"]
         id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
         n_landmarks = len(active_ids)
-        window_poses = list(S["pose_history"])
         
-        obs_map = {f_idx: {"ids": [],"pixels": []} for f_idx in range(len(window_poses))}
+        window_poses = list(S["pose_history"])
+                
+        active_ids = S["ids"]
+        id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
+        n_landmarks = len(active_ids)
+        
+        # Build a flat list of all 2D observations in the window
+        obs_map = {}  # (frame_idx, landmark_idx) -> pixel (u, v)
+        
         for f_idx, (pixels, ids) in enumerate(S["P_history"]):
-            for p, id_ in zip(pixels, ids):
-                if id_ in id_to_idx:
-                    obs_map[f_idx]["ids"].append(id_to_idx[id_]) #local landmark index
-                    obs_map[f_idx]["pixels"].append(p[0]) #(u,v) from (1,2)
-
-        #convert to numpy arrays
-        for f_idx in obs_map.keys():
-            obs_map[f_idx]["ids"] = np.array(obs_map[f_idx]["ids"], dtype=np.int64)
-            obs_map[f_idx]["pixels"] = np.array(obs_map[f_idx]["pixels"], dtype=np.float64)
-
-        obs_list = []
-        for f_idx in obs_map.keys():
-            ids_local = obs_map[f_idx]["ids"]
-            for lm_idx in ids_local:
-                obs_list.append((f_idx, int(lm_idx)))
-
+            local_ids = []
+            local_pixels = []
+            for p, pt_id in zip(pixels, ids):
+                if pt_id in id_to_idx:
+                    local_ids.append(id_to_idx[pt_id])
+                    local_pixels.append(p[0]) # Extract (u, v)
+            
+            # Fill the dictionary for this frame
+            obs_map[f_idx] = {
+                'ids': np.array(local_ids),
+                'pixels': np.array(local_pixels)
+            }
+        
+        obs_list_for_sparsity = []
+        for f_idx, data in obs_map.items():
+            for l_idx in data['ids']:
+                obs_list_for_sparsity.append((f_idx, l_idx))
+                
         # Pack variables and Sparsity Mask
         x0 = pack_params(window_poses, S["X"])
-        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list)  # needed for scipy least square
+        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list_for_sparsity)  # needed for scipy least square
+
+        #r0 = compute_rep_err(x0, window_poses, n_landmarks, obs_map, self.params.k)
+        #print(f"BA before:RMSE={np.sqrt(np.mean(r0**2)):.3f},Nres={r0.size}")
 
         r0 = compute_rep_err(x0, window_poses, n_landmarks, obs_map, self.params.k)
         print(f"BA before:RMSE={np.sqrt(np.mean(r0**2)):.3f},Nres={r0.size}")
@@ -758,8 +770,8 @@ class Pipeline():
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
 
-        r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
-        print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
+        #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
+        #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
         # Update State with Refined Values
         new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
