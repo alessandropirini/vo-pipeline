@@ -760,7 +760,7 @@ class Pipeline():
 
         # Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
-            compute_rep_err(), x0, 
+            compute_rep_err, x0, 
             jac_sparsity=A,
             args=(len(window_poses), n_landmarks, obs_list, obs_pixels),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
