@@ -29,13 +29,6 @@ MALAGA_BS_KF = 5
 PARKING_BS_KF = 3
 CUSTOM_BS_KF = 5
 
-# Number of rows and columns to divide image into for feature detection and number of features to track in each cell
-KITTI_ST_ROWS, KITTI_ST_COLS, KITTI_NUM_FEATURES = 2, 4, 20
-MALAGA_ST_ROWS, MALAGA_ST_COLS, MALAGA_NUM_FEATURES = 2, 4, 20
-PARKING_ST_ROWS, PARKING_ST_COLS, PARKING_NUM_FEATURES = 2, 4, 20
-CUSTOM_ST_ROWS, CUSTOM_ST_COLS, CUSTOM_NUM_FEATURES = 2, 4, 20
-
-
 # Define dataset paths
 # (Set these variables before running)
 kitti_path = "kitti/kitti05/kitti"
@@ -193,20 +186,18 @@ match DATASET:
     case _:
         raise ValueError("Invalid dataset index")
 
-
-
 class VO_Params():
     bs_kf_1 : str # path to first keyframe used for bootstrapping dataset
     bs_kf_2 : str # path to second keyframe used for bootstrapping dataset
+    rows_roi_corners : int # number of rows to split image into for feature detection
+    cols_roi_corners : int # number of cols to split image into for feature detection
     feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
-    shi_tomasi_params : dict
-    klt_params : dict
+    shi_tomasi_params : dict # cv2 parameters for Shi-Tomasi corners
+    klt_params : dict # cv2 parameters for KLT tracking
     k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    rows_roi_corners : int
-    cols_roi_corners : int
-    abs_eig_min : float = 1e-2    
+    abs_eig_min : float = 1e-2 
     alpha : float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
@@ -253,8 +244,6 @@ class VO_Params():
 
         return masks
 
-
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 class Pipeline():
 
     params: VO_Params
@@ -723,7 +712,7 @@ class Pipeline():
         return S_new
     
 
-    def sliding_window_refinement(self, S: dict) -> dict:
+    def slidingWindowRefinement(self, S: dict) -> dict:
         """
         Perform sliding window bundle adjustment to refine camera poses and 3D landmarks in the current window.
         Args:
@@ -786,13 +775,16 @@ class Pipeline():
         #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
         #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
+        #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
+        #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
+
         # Update State with Refined Values
         new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
         
         # Update current state
         S["X"] = new_X  # refined landmarks
-        current_pose = list(new_poses.values())[-1]
-        S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
+        current_pose = new_poses[len(window_poses) - 1]
+        #S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -823,9 +815,10 @@ class Pipeline():
         S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
         return (S, homography)
     
+# create instance of parameters
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 
-
-# Create instance of pipeline
+# create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
@@ -878,7 +871,7 @@ for i in range(params.start_idx + 1, last_frame):
     
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
-        S = pipeline.sliding_window_refinement(S)
+        S = pipeline.slidingWindowRefinement(S)
         pose = list(S["pose_history"])[-1]
 
     # plot inlier keypoints
@@ -902,16 +895,16 @@ for i in range(params.start_idx + 1, last_frame):
     est_path.append([t_wc[0], t_wc[2]])
     theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
     
-    # updateTrajectoryPlot(
-    #     plot_state, 
-    #     np.asarray(est_path), 
-    #     theta, 
-    #     S["X"],
-    #     S["P"].shape[0], 
-    #     flow_bgr=img_to_show,
-    #     frame_idx=frame_counter,
-    #     n_inliers=n_inliers,
-    # )
+    updateTrajectoryPlot(
+        plot_state, 
+        np.asarray(est_path), 
+        theta, 
+        S["X"],
+        S["P"].shape[0], 
+        flow_bgr=img_to_show,
+        frame_idx=frame_counter,
+        n_inliers=n_inliers,
+    )
     
 
     # update last image
@@ -929,3 +922,4 @@ for i in range(params.start_idx + 1, last_frame):
     cv2.waitKey(10)
 
 cv2.destroyAllWindows()
+
