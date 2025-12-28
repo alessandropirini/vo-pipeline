@@ -14,7 +14,7 @@ from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 3
 
 # Next keyframe to use for bootstrapping
 KITTI_BS_KF = 3
@@ -199,16 +199,6 @@ class VO_Params():
     cols_roi_corners : int
     abs_eig_min : float = 1e-2    
     alpha : float = 0.02
-    
-    # NOTE if they are all the same just avoid all this block of code
-    # if DATASET == 0: 
-    #     alpha : float = 0.02
-    # elif DATASET == 1: 
-    #     alpha : float = 0.02
-    # elif DATASET == 2:
-    #     alpha : float = 0.02
-    # elif DATASET == 3: 
-    #     alpha : float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
@@ -742,8 +732,7 @@ class Pipeline():
         n_landmarks = len(active_ids)
         
         window_poses = list(S["pose_history"])
-        window_frames = list(range(len(window_poses)))  # indices of frames in the window
-        
+                
         active_ids = S["ids"]
         id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
         n_landmarks = len(active_ids)
