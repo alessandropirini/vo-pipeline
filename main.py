@@ -9,7 +9,7 @@ import scipy
 from scipy.optimize import least_squares
 from collections import deque
 
-from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
+from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlow
 from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points
 
 ##-------------------GLOBAL VARIABLES------------------##
@@ -21,7 +21,7 @@ class D:
     CUSTOM = 3
 
 
-DATASET = 3
+DATASET = 0
 
 # Next keyframe to use for bootstrapping
 KITTI_BS_KF = 3
@@ -54,20 +54,20 @@ match DATASET:
 
     ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 50,
+        feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
-                            maxLevel = 3,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
-        rows_roi_corners = 3
-        cols_roi_corners = 3
+        rows_roi_corners = 2
+        cols_roi_corners = 4
         
         # Bootstrapping parameters
         bs_kf_1 = images[0]
@@ -817,9 +817,10 @@ class Pipeline():
     
 # create instance of parameters
 params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
+plot_same_window = False
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
 # generate initial state
@@ -834,6 +835,11 @@ last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
 
 total_frames = last_frame - params.start_idx
+if plot_same_window:
+    plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+else:
+    plot_state = initTrajectoryPlotNoFlow(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+    
 plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
 
 R_cw = homography[:3, :3]
@@ -893,19 +899,7 @@ for i in range(params.start_idx + 1, last_frame):
     R_wc = R_cw.T
     t_wc = - R_wc @ t_cw
     est_path.append([t_wc[0], t_wc[2]])
-    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
-    
-    updateTrajectoryPlot(
-        plot_state, 
-        np.asarray(est_path), 
-        theta, 
-        S["X"],
-        S["P"].shape[0], 
-        flow_bgr=img_to_show,
-        frame_idx=frame_counter,
-        n_inliers=n_inliers,
-    )
-    
+    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)    
 
     # update last image
     last_image = image
@@ -918,8 +912,33 @@ for i in range(params.start_idx + 1, last_frame):
               f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
               f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
     
-    cv2.imshow("tracking...", img_to_show)
-    cv2.waitKey(10)
+    
+    if plot_same_window:
+        updateTrajectoryPlot(
+            plot_state, 
+            np.asarray(est_path), 
+            theta, 
+            S["X"],
+            S["P"].shape[0], 
+            flow_bgr=img_to_show,
+            frame_idx=frame_counter,
+            n_inliers=n_inliers,
+        )
+    else:
+
+        updateTrajectoryPlotNoFlow(
+            plot_state, 
+            np.asarray(est_path), 
+            theta, 
+            S["X"],
+            S["P"].shape[0], 
+            flow_bgr=img_to_show,
+            frame_idx=frame_counter,
+            n_inliers=n_inliers,
+        )
+        
+        cv2.imshow("tracking...", img_to_show)
+        cv2.waitKey(10)
 
 cv2.destroyAllWindows()
 
