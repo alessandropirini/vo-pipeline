@@ -444,8 +444,7 @@ class Pipeline():
         
         if self.use_sliding_BA:
             state["ids"] = state["ids"][status == 1]    # filter new ids
-            state["P_history"].append((state["P"].copy(), state["ids"].copy()))  # append the new keypoints
-            
+                        
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
         candidates = as_lk_points(state["C"])
@@ -817,10 +816,10 @@ class Pipeline():
     
 # create instance of parameters
 params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
-plot_same_window = False
+plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
 # generate initial state
@@ -835,13 +834,12 @@ last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
 
 total_frames = last_frame - params.start_idx
+
 if plot_same_window:
     plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
 else:
     plot_state = initTrajectoryPlotNoFlow(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
     
-plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
-
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
@@ -877,6 +875,7 @@ for i in range(params.start_idx + 1, last_frame):
     
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
+        S["P_history"].append((S["P"].copy(), S["ids"].copy()))  # append the new keypoints
         S = pipeline.slidingWindowRefinement(S)
         pose = list(S["pose_history"])[-1]
 
@@ -925,7 +924,6 @@ for i in range(params.start_idx + 1, last_frame):
             n_inliers=n_inliers,
         )
     else:
-
         updateTrajectoryPlotNoFlow(
             plot_state, 
             np.asarray(est_path), 
