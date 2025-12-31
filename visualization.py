@@ -27,7 +27,7 @@ def initTrajectoryPlot(
     # ---------- GLOBAL TRAJECTORY ----------
     if (gt_path is not None) and (len(gt_path) > 0):
         x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
-        #ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
+        ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
 
         # start centered around GT extents
         xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
@@ -235,17 +235,21 @@ def initTrajectoryPlotNoFlow(
         "gylim": list(ax_global.get_ylim()),
     }
 
-def updateTrajectoryPlotNoFlow(
+def updateTrajectoryPlotNoFlowBA(
     plot_state,
-    est_path: np.ndarray,
-    theta: float,
+    full_trajectory: list,
     pts3d: np.ndarray,
     n_keypoints: int,
     flow_bgr: np.ndarray | None = None,
     frame_idx: int | None = None,
     n_inliers: int | None = None,
 ):
-    # ---------- GLOBAL ----------
+     # ---------- GLOBAL ----------
+    points = [state[0] for state in full_trajectory]
+    angles = [state[1] for state in full_trajectory]
+    theta = angles[-1]
+    
+    est_path = np.stack(points)
     x, y = est_path[:, 0], est_path[:, 1]
     plot_state["est_line"].set_data(x, y)
     plot_state["est_point"].set_data([x[-1]], [y[-1]])
@@ -331,10 +335,10 @@ def updateTrajectoryPlotNoFlow(
 
     plt.pause(0.001)
 
-def updateTrajectoryPlot(
+
+def updateTrajectoryPlotBA(
     plot_state,
-    est_path: np.ndarray,
-    theta: float,
+    full_trajectory: list,
     pts3d: np.ndarray,
     n_keypoints: int,
     flow_bgr: np.ndarray | None = None,
@@ -342,6 +346,11 @@ def updateTrajectoryPlot(
     n_inliers: int | None = None,
 ):
     # ---------- GLOBAL ----------
+    points = [state[0] for state in full_trajectory]
+    angles = [state[1] for state in full_trajectory]
+    theta = angles[-1]
+    
+    est_path = np.stack(points)
     x, y = est_path[:, 0], est_path[:, 1]
     plot_state["est_line"].set_data(x, y)
     plot_state["est_point"].set_data([x[-1]], [y[-1]])

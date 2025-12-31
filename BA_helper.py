@@ -68,9 +68,10 @@ def compute_rep_err(x_vec, window_poses: list, n_landmarks: int, obs_map: dict, 
         pose = poses[f_idx]
         visible_ids = obs_map[f_idx]['ids']
         observed_pixels = obs_map[f_idx]['pixels']
-        
-        projected = project_points(landmarks[:, visible_ids], pose, k)
-        
+        if visible_ids.shape[0] > 0: 
+            projected = project_points(landmarks[:, visible_ids], pose, k)
+        else: 
+            continue
         # Error calculation
         err = (observed_pixels - projected).flatten()
         residuals.append(err)

@@ -9,7 +9,7 @@ import scipy
 from scipy.optimize import least_squares
 from collections import deque
 
-from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlow
+from visualization import initTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlowBA, updateTrajectoryPlotBA
 from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points
 
 ##-------------------GLOBAL VARIABLES------------------##
@@ -54,11 +54,11 @@ match DATASET:
 
     ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 60,
+        feature_params = dict(  maxCorners = 100,
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7)
-
+        
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
@@ -75,7 +75,7 @@ match DATASET:
         start_idx = KITTI_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 10
+        window_size = 5
 
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -252,7 +252,7 @@ class Pipeline():
         self.params = params
         self.use_sliding_BA : bool = use_sliding_window_BA  # whether we want to use sliding_window BA or not, by default, it's false
         self.next_id : int = 0  # this parameter is only used for sliding BA and is used to keep track of landmarks through operation (cause landmarks might decrease/increase)
-
+        self.full_trajectory = []
     
     def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
         """
@@ -760,9 +760,6 @@ class Pipeline():
         x0 = pack_params(window_poses, S["X"])
         A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list_for_sparsity)  # needed for scipy least square
 
-        #r0 = compute_rep_err(x0, window_poses, n_landmarks, obs_map, self.params.k)
-        #print(f"BA before:RMSE={np.sqrt(np.mean(r0**2)):.3f},Nres={r0.size}")
-
         # Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
             compute_rep_err, x0, 
@@ -770,9 +767,6 @@ class Pipeline():
             args=(window_poses, n_landmarks, obs_map, self.params.k),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
-
-        #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
-        #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
         #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
         #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
@@ -791,7 +785,27 @@ class Pipeline():
             
         return S
     
-
+    def updateFullTraj(self, window_poses): 
+        
+        full_traj = self.full_trajectory.copy()
+        
+        #Convert into world Frame:
+        window_poses_list = list(window_poses)
+        local_traj = []
+        for pose in window_poses_list:
+            R_cw = pose[:3, :3]
+            t_cw = pose[:3, 3]
+            R_wc = R_cw.T
+            t_wc = - R_wc @ t_cw
+            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
+            state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
+            local_traj.append(state_to_plot)
+        
+        start_idx = max(0, len(full_traj)-len(local_traj))
+        full_traj[start_idx:start_idx+len(local_traj)]=local_traj
+        
+        return full_traj 
+    
     def pipeline_init(self):
         """
         Initialize the VO pipeline by bootstrapping from the first two keyframes.
@@ -816,7 +830,7 @@ class Pipeline():
     
 # create instance of parameters
 params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
-plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
+plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
@@ -825,8 +839,6 @@ pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_
 # generate initial state
 S, homography = pipeline.pipeline_init()
 
-# ploting setup
-est_path = []
 # initialize previous image
 last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 
@@ -840,12 +852,15 @@ if plot_same_window:
 else:
     plot_state = initTrajectoryPlotNoFlow(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
     
+
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
-est_path.append([t_wc[0], t_wc[2]])
 theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+
+state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
+pipeline.full_trajectory.append(state_to_plot)
 
 #Initialize candidate set with the second keyframe
 potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
@@ -873,11 +888,15 @@ for i in range(params.start_idx + 1, last_frame):
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
     
+    dummy=(np.zeros(2), 0)
+    pipeline.full_trajectory.append(dummy)
+    
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
         S["P_history"].append((S["P"].copy(), S["ids"].copy()))  # append the new keypoints
         S = pipeline.slidingWindowRefinement(S)
         pose = list(S["pose_history"])[-1]
+        pipeline.full_trajectory = pipeline.updateFullTraj(S["pose_history"])
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
@@ -890,15 +909,7 @@ for i in range(params.start_idx + 1, last_frame):
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
-    n_inliers = len(inliers_idx)
-
-    # plot current pose
-    R_cw = pose[:3, :3]
-    t_cw = pose[:3, 3]
-    R_wc = R_cw.T
-    t_wc = - R_wc @ t_cw
-    est_path.append([t_wc[0], t_wc[2]])
-    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)    
+    n_inliers = len(inliers_idx) 
 
     # update last image
     last_image = image
@@ -913,30 +924,32 @@ for i in range(params.start_idx + 1, last_frame):
     
     
     if plot_same_window:
-        updateTrajectoryPlot(
-            plot_state, 
-            np.asarray(est_path), 
-            theta, 
-            S["X"],
-            S["P"].shape[0], 
-            flow_bgr=img_to_show,
-            frame_idx=frame_counter,
-            n_inliers=n_inliers,
-        )
+        updateTrajectoryPlotBA(
+        plot_state, 
+        pipeline.full_trajectory,
+        S["X"],
+        S["P"].shape[0], 
+        flow_bgr=img_to_show,
+        frame_idx=frame_counter,
+        n_inliers=n_inliers
+    )
     else:
-        updateTrajectoryPlotNoFlow(
+        updateTrajectoryPlotNoFlowBA(
             plot_state, 
-            np.asarray(est_path), 
-            theta, 
+            pipeline.full_trajectory,
             S["X"],
             S["P"].shape[0], 
             flow_bgr=img_to_show,
             frame_idx=frame_counter,
-            n_inliers=n_inliers,
+            n_inliers=n_inliers
         )
         
         cv2.imshow("tracking...", img_to_show)
         cv2.waitKey(10)
 
 cv2.destroyAllWindows()
+
+
+
+
 
