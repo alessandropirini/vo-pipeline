@@ -10,7 +10,7 @@ from scipy.optimize import least_squares
 from collections import deque
 
 from visualization import initTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlowBA, updateTrajectoryPlotBA
-from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points, unpack_params_T
+from BA_helper import as_lk_points, pack_params, get_jac_sparsity, compute_rep_err, unpack_params_T
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
