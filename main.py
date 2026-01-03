@@ -11,6 +11,7 @@ from collections import deque
 
 from visualization import * 
 from BA_helper import as_lk_points, pack_params, get_jac_sparsity, compute_rep_err, unpack_params_T
+from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane_ransac
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
@@ -58,6 +59,10 @@ match DATASET:
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7)
+        feature_params_gd_detection = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 3)
         
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
@@ -97,6 +102,10 @@ match DATASET:
                                 qualityLevel = 0.05,
                                 minDistance = 10,
                                 blockSize = 9 )
+        feature_params_gd_detection = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 3)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
@@ -201,7 +210,9 @@ class VO_Params():
     cols_roi_corners_bs : int # number of cols to split image into for ground and feature detection in bootstrapping
     rows_roi_corners : int # number of rows to split image into for feature detection
     cols_roi_corners : int # number of cols to split image into for feature detection
+    feature_masks_bs: list[np.ndarray] # mask image into regions for feature tracking 
     feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
+    shi_tomasi_params_bs : dict # cv2 parameters for Shi-Tomasi corners in bootstrapping phase
     shi_tomasi_params : dict # cv2 parameters for Shi-Tomasi corners
     klt_params : dict # cv2 parameters for KLT tracking
     k : np.ndarray # camera intrinsics matrix
@@ -210,19 +221,28 @@ class VO_Params():
     abs_eig_min : float = 1e-2 
     alpha : float = 0.02
 
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
+        self.feature_masks_bs = self.get_feature_masks(bs_kf_1, rows_roi_corners_bs, cols_roi_corners_bs)
         self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
+        self.shi_tomasi_params_bs = shi_tomasi_params_bs
         self.shi_tomasi_params = shi_tomasi_params
         self.klt_params = klt_params
         self.k = k
         self.start_idx = start_idx
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
+        self.rows_roi_corners_bs = rows_roi_corners_bs
+        self.cols_roi_corners_bs = cols_roi_corners_bs
         self.rows_roi_corners = rows_roi_corners
         self.cols_roi_corners = cols_roi_corners
         self.window_size = window_size
-    
+
+        self.idx_ground = self.rows_roi_corners_bs * self.cols_roi_corners_bs -(np.floor(self.cols_roi_corners_bs/2).astype(int)+1)
+        ground_list = [self.idx_ground-1, self.idx_ground, self.idx_ground+1]
+        self.idx_ground_set = set(ground_list)
+        self.approx_car_height = 1.5
+
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
 
@@ -236,17 +256,17 @@ class VO_Params():
         """
         # get image shape
         img = cv2.imread(img_path)
-        H, W = img.shape[:2]
+        self.H, self.W = img.shape[:2]
 
         # get boundries of the cells
-        row_boundries = np.linspace(0, H, rows + 1, dtype=int)
-        col_boundries = np.linspace(0, W, cols + 1, dtype=int)
+        row_boundries = np.linspace(0, self.H, rows + 1, dtype=int)
+        col_boundries = np.linspace(0, self.W, cols + 1, dtype=int)
 
         # create masks left to right, top to bottom
         masks = []
         for row in range(rows):
             for col in range(cols):
-                mask = np.zeros((H, W), dtype="uint8")
+                mask = np.zeros((self.H, self.W), dtype="uint8")
                 r_s, r_e = row_boundries[[row, row + 1]]
                 c_s, c_e = col_boundries[[col, col + 1]]
                 mask[r_s:r_e, c_s:c_e] = 255
@@ -258,36 +278,14 @@ class Pipeline():
 
     params: VO_Params
 
-    def __init__(self, params: VO_Params, use_sliding_window_BA: bool = False):
+    def __init__(self, params: VO_Params, use_sliding_window_BA: bool = False, use_scale :bool = False):
         self.params = params
         self.use_sliding_BA : bool = use_sliding_window_BA  # whether we want to use sliding_window BA or not, by default, it's false
         self.next_id : int = 0  # this parameter is only used for sliding BA and is used to keep track of landmarks through operation (cause landmarks might decrease/increase)
         self.full_trajectory = []
-    
-    def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
-        """
-        Return the index of the grid mask containing pixel (u, v).
-
-        Masks are ordered left-to-right, top-to-bottom.
-
-        Args:
-            u (int): pixel column (x)
-            v (int): pixel row (y)
-            H (int): image height
-            W (int): image width
-            rows (int): number of grid rows
-            cols (int): number of grid columns
-
-        Returns:
-            int: index of the corresponding mask
-        """
-        cell_h = H / rows
-        cell_w = W / cols
-
-        row_idx = min(int(v // cell_h), rows - 1)
-        col_idx = min(int(u // cell_w), cols - 1)
-
-        return row_idx * cols + col_idx
+        self.last_scale = 1
+        self.use_scale : bool = use_scale
+        self.visualize = True
 
     def extractFeaturesBootstrap(self):
         """
@@ -300,14 +298,35 @@ class Pipeline():
         img_grayscale = cv2.imread(self.params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
         for n, mask in enumerate(self.params.feature_masks):
             features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
+            
             # If no corners are found in this region, skip it
             if features is None: 
                 print(f"No features found for mask {n+1}!")
                 continue
-            # Warn if very few features were found in this region (not necessarily an error)
-            if features.shape[0] < 10:
-                #print(f"Only {features.shape[0]} features found for mask {n+1}!")
-                pass
+
+            st_corners = np.vstack((st_corners, features))
+        return st_corners
+    
+    def extractFeaturesGD(self):
+        """
+        Step 1 (Initialization): detect Shi-Tomasi corners on a grid using feature masks.
+
+        Returns:
+            st_corners (np.ndarray): (N, 1, 2) float32 corners for KLT tracking.
+        """
+        st_corners = np.empty((0, 1, 2), dtype=np.float32)
+        img_grayscale = cv2.imread(self.params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
+        for n, mask in enumerate(self.params.feature_masks_bs):
+            if n in self.params.idx_ground_set: 
+                features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params_bs)
+            else:
+                continue
+            
+            # If no corners are found in this region, skip it
+            if features is None: 
+                print(f"No features found for mask {n+1}!")
+                continue
+
             st_corners = np.vstack((st_corners, features))
         return st_corners
 
@@ -721,6 +740,25 @@ class Pipeline():
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
     
+    
+    def ground_detection(self, current_keypoints:np.ndarray, current_3d_landmarks: np.ndarray):
+        
+        current_keypoints = np.squeeze(current_keypoints,axis=1)
+        idx_pts = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners_bs, self.params.cols_roi_corners_bs, current_keypoints)
+        gd_mask = (idx_pts == self.params.idx_ground) | (idx_pts == self.params.idx_ground+1) | (idx_pts == self.params.idx_ground-1)
+        
+        gd_points = current_3d_landmarks[:, gd_mask]
+        if gd_points.shape[1] > 0: 
+            h, inliers = estimate_ground_height(gd_points, self.params.approx_car_height)
+            if h is not None:
+                print(f"Height: {h}")
+                scale = self.params.approx_car_height / h
+                self.last_scale = scale
+            else: 
+                self.last_scale=1
+        
+        return self.last_scale, gd_mask, inliers
+    
 
     def slidingWindowRefinement(self, S: dict) -> dict:
         """
@@ -816,7 +854,7 @@ class Pipeline():
         
         return full_traj 
     
-    def pipeline_init(self):
+    def pipeline_init(self, img):
         """
         Initialize the VO pipeline by bootstrapping from the first two keyframes.
         Returns:
@@ -836,18 +874,64 @@ class Pipeline():
         
         # generate initial state
         S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
-        return (S, homography)
+
+        gd_features_kf_1 = self.extractFeaturesGD()
+        bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2 = self.trackForwardBootstrap(gd_features_kf_1)
+        gd_point_cloud = self.bootstrapPointCloud(homography, bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2)
+        scale=1
+        if self.use_scale : 
+            scale, gd_mask, inliers = pipeline.ground_detection(bs_gd_tracked_features_kf_2, gd_point_cloud)
+
+            if self.visualize : 
+
+                gd_fit_2 = bs_gd_tracked_features_kf_2[gd_mask, :, :]
+                gd_fit_2 = gd_fit_2[inliers, :, :]
+                gd_point_cloud = gd_point_cloud[:, gd_mask]
+
+                #DRAW ALL FEATURES IN BLUE 
+                vis = draw_new_features(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), ransac_features_kf_2, color=(255, 255, 0))
+
+                #DRAW ESTIMATED GROUND IN RED 
+                vis = draw_new_features(vis, bs_gd_tracked_features_kf_2, color=(0, 0, 255))
+
+                #DRAW INLIERS GROUND IN GREEN 
+                vis = draw_new_features(vis, gd_fit_2, color=(0, 255, 0))
+
+                # Recover plane parameters again for visualization
+                n, d, _ = fit_ground_plane_ransac(
+                    gd_point_cloud,
+                    dist_thresh=0.001 * np.median(np.linalg.norm(gd_point_cloud, axis=0)),
+                    expected_normal=np.array([0, 1, 0])
+                    )
+
+                vis = draw_plane_on_image(vis, n, d, K, homography)
+                cv2.imshow("Ground detection", vis)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
+                
+                visualize_ground_plane(
+                    X_all=bootstrap_point_cloud,
+                    X_ground=gd_point_cloud,
+                    inliers=inliers,
+                    n=n,
+                    d=d,
+                    title="Bootstrap ground plane fit"
+                )
+        
+        return (S, homography, scale)
     
 # create instance of parameters
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, feature_params_gd_detection, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
-pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
+use_scale : bool = True
+pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
+img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
 # generate initial state
-S, homography = pipeline.pipeline_init()
+S, homography, scale = pipeline.pipeline_init(img)
 
 # initialize previous image
 last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
@@ -941,7 +1025,8 @@ for i in range(params.start_idx + 1, last_frame):
         S["P"].shape[0], 
         flow_bgr=img_to_show,
         frame_idx=frame_counter,
-        n_inliers=n_inliers
+        n_inliers=n_inliers, 
+        scale=scale
     )
     else:
         updateTrajectoryPlotNoFlowBA(

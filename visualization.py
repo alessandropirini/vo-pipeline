@@ -344,13 +344,16 @@ def updateTrajectoryPlotBA(
     flow_bgr: np.ndarray | None = None,
     frame_idx: int | None = None,
     n_inliers: int | None = None,
+    scale :float = 1
 ):
     # ---------- GLOBAL ----------
     points = [state[0] for state in full_trajectory]
     angles = [state[1] for state in full_trajectory]
     theta = angles[-1]
     
-    est_path = np.stack(points)
+    pts_3d = pts3d.copy()
+    est_path = scale*np.stack(points)
+    pts_3d*=scale
     x, y = est_path[:, 0], est_path[:, 1]
     plot_state["est_line"].set_data(x, y)
     plot_state["est_point"].set_data([x[-1]], [y[-1]])
@@ -393,8 +396,8 @@ def updateTrajectoryPlotBA(
     y_loc = y[-k:]
     plot_state["local_traj"].set_data(x_loc, y_loc)
 
-    if pts3d.size > 0:
-        plot_state["map_scatter"].set_offsets(np.column_stack((pts3d[0, :], pts3d[2, :])))
+    if pts_3d.size > 0:
+        plot_state["map_scatter"].set_offsets(np.column_stack((pts_3d[0, :], pts_3d[2, :])))
 
     axl = plot_state["ax_local"]
     cx, cy = x_loc[-1], y_loc[-1]
