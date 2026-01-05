@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 1
 
 class D:
     KITTI = 0
@@ -127,11 +127,28 @@ match DATASET:
 
     ##------------------PARAMETERS FOR MALAGA------------------##
         # Shi-Tomasi corner parameters
+        feature_params_BA = dict(  maxCorners = 100,
+                                qualityLevel = 0.01,
+                                minDistance = 10,
+                                blockSize = 7 )
+
+        #RANSAC PARAMETERS 
+        ransac_params_BA = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_P3P,
+                                reprojectionError=2.0,
+                                confidence=0.99,
+                                iterationsCount=2000)
+
+        # Parameters for LKT
+        lk_params_BA = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+        
         feature_params = dict(  maxCorners = 100,
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7 )
-        
         feature_params_gd_detection = dict( maxCorners = 100,
                                         qualityLevel = 0.005,
                                         minDistance = 3,
@@ -140,14 +157,14 @@ match DATASET:
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
                                 flags=cv2.SOLVEPNP_P3P,
-                                reprojectionError=5.0,
+                                reprojectionError=2.0,
                                 confidence=0.99,
                                 iterationsCount=2000)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.01))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
@@ -166,6 +183,8 @@ match DATASET:
 
         alpha : float = 0.02
         abs_eig_min : float = 1e-2
+        min_features : int = 50
+        min_features_BA : int = 50
         
     case D.PARKING:
         assert 'parking_path' in locals(), "You must define parking_path"
@@ -1029,7 +1048,7 @@ class Pipeline():
 plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
 use_scale : bool = True
 # create instance of parameters
 if use_sliding_window_BA: 
