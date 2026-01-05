@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 1
+DATASET = 3
 
 class D:
     KITTI = 0
@@ -43,7 +43,6 @@ match DATASET:
         assert 'kitti_path' in locals(), "You must define kitti_path"
         img_dir = os.path.join(kitti_path, '05/image_0')
         images = sorted(glob(os.path.join(img_dir, '*.png')))
-        print(len(images))
         last_frame = 4540
         K = np.array([
             [7.18856e+02, 0, 6.071928e+02],
@@ -930,6 +929,7 @@ class Pipeline():
             t_wc = - R_wc @ t_cw
             forward_vec = R_wc[:, 2]
             theta = np.arctan2(forward_vec[0], forward_vec[2])
+            theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
             state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
             local_traj.append(state_to_plot)
         
@@ -1049,8 +1049,7 @@ R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
 forward_vec = R_wc[:, 2]
 theta = np.arctan2(forward_vec[0], forward_vec[2])
-
-
+theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
 state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
 pipeline.full_trajectory.append(state_to_plot)
 
@@ -1096,6 +1095,7 @@ for i in range(params.start_idx + 1, last_frame):
         t_wc = - R_wc @ t_cw
         forward_vec = R_wc[:, 2]
         theta = np.arctan2(forward_vec[0], forward_vec[2])
+        theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
         state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
         pipeline.full_trajectory.append(state_to_plot)
 
