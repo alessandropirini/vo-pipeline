@@ -198,7 +198,7 @@ match DATASET:
     ##------------------PARAMETERS FOR PARKING------------------##
         # Shi-Tomasi corner parameters    
         # Paramaters for Shi-Tomasi corners
-        feature_params = dict( maxCorners = 100,
+        feature_params = dict( maxCorners = 150,
                             qualityLevel = 0.05,
                             minDistance = 7,
                             blockSize = 7 )
@@ -210,7 +210,7 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_EPNP,
+                                flags=cv2.SOLVEPNP_P3P,
                                 reprojectionError=2.0,
                                 confidence=0.99,
                                 iterationsCount=1000)
@@ -233,7 +233,7 @@ match DATASET:
         start_idx = PARKING_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 10
+        window_size = 5
 
         alpha : float = 0.05
         abs_eig_min : float = 1e-5
@@ -265,7 +265,7 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_EPNP,
+                                flags=cv2.SOLVEPNP_P3P,
                                 reprojectionError=5.0,
                                 confidence=0.99,
                                 iterationsCount=100)
