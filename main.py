@@ -123,14 +123,14 @@ match DATASET:
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
                                 flags=cv2.SOLVEPNP_P3P,
-                                reprojectionError=2.0,
+                                reprojectionError=5.0,
                                 confidence=0.99,
                                 iterationsCount=2000)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.01))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
@@ -161,7 +161,6 @@ match DATASET:
         
     ##------------------PARAMETERS FOR PARKING------------------##
         # Shi-Tomasi corner parameters    
-        # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
         # Paramaters for Shi-Tomasi corners
         feature_params = dict( maxCorners = 100,
                             qualityLevel = 0.01,
@@ -781,7 +780,7 @@ class Pipeline():
                 continue
             
             num_features = features.shape[0]
-            if num_features < min_features and num_features > 10: 
+            if num_features < min_features and num_features > 15: 
                 min_features = num_features 
             
             feature_list.append(features)
@@ -909,7 +908,7 @@ class Pipeline():
         # Update current state
         S = new_S
         S["X"] = new_X  # refined landmarks
-        current_pose = new_poses[len(window_poses) - 1]
+        # current_pose = new_poses[len(window_poses) - 1]
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -929,7 +928,8 @@ class Pipeline():
             t_cw = pose[:3, 3]
             R_wc = R_cw.T
             t_wc = - R_wc @ t_cw
-            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+            forward_vec = R_wc[:, 2]
+            theta = np.arctan2(forward_vec[0], forward_vec[2])
             state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
             local_traj.append(state_to_plot)
         
@@ -1019,10 +1019,10 @@ params = VO_Params(bs_kf_1,
                    alpha, 
                    abs_eig_min)
 
-plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
+plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
 use_scale : bool = False
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
@@ -1047,7 +1047,9 @@ R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
-theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+forward_vec = R_wc[:, 2]
+theta = np.arctan2(forward_vec[0], forward_vec[2])
+
 
 state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
 pipeline.full_trajectory.append(state_to_plot)
@@ -1092,22 +1094,23 @@ for i in range(params.start_idx + 1, last_frame):
         t_cw = pose[:3, 3]
         R_wc = R_cw.T
         t_wc = - R_wc @ t_cw
-        theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
-
+        forward_vec = R_wc[:, 2]
+        theta = np.arctan2(forward_vec[0], forward_vec[2])
         state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
         pipeline.full_trajectory.append(state_to_plot)
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
-    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(S, pose)
-
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+
+    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
+    S = pipeline.tryTriangulating(S, pose)
+
     n_inliers = len(inliers_idx) 
 
     # update last image
