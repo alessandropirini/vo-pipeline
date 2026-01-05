@@ -123,7 +123,6 @@ def estimate_ground_height(pts_3d, car_height):
     dist_thresh = 0.005 * d_ref 
 
     expected_up = np.array([0, 1, 0]) 
-
     n, d, inliers = fit_ground_plane_ransac(
         pts_3d, 
         dist_thresh=dist_thresh,
@@ -140,7 +139,8 @@ def estimate_ground_height(pts_3d, car_height):
     # d is distance from origin to plane.
     height = abs(d) #of the points in the world coordinate
     print(inlier_ratio, car_height-height)
-    if inlier_ratio > 0.4 and 0.2 < abs(car_height-height)< 0.8:    
+    if inlier_ratio > 0.35 and 0.15 < abs(car_height-height)< 0.8:    
         return height, inliers
     else: 
-        return None
+        print("NOT ENOUGH INLIERS TO ESTIMATE A GOOD PLANE ")
+        return None, None

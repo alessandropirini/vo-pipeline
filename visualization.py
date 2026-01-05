@@ -362,7 +362,8 @@ def updateTrajectoryPlotBA(
     flow_bgr: np.ndarray | None = None,
     frame_idx: int | None = None,
     n_inliers: int | None = None,
-    scale :float = 1
+    scale :float = 1.0, 
+    fps : float = None
 ):
     # ---------- GLOBAL ----------
     x0_g = 0
@@ -470,8 +471,8 @@ def updateTrajectoryPlotBA(
         if tot is None:
             plot_state["fig"].suptitle(f"Frame {frame_idx}")
         else:
-            plot_state["fig"].suptitle(f"Frame {frame_idx} / {tot}")
-
+            plot_state["fig"].suptitle(f"Frame {frame_idx} / {tot}    |    FPS (not considering plotting): {fps:.1f}"
+)
     plt.pause(0.001)
 
 def draw_optical_flow(

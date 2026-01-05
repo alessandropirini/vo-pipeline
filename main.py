@@ -1,5 +1,6 @@
 import os
 from glob import glob
+import time
 
 from typing import Tuple
 
@@ -26,7 +27,7 @@ class D:
 # Next keyframe to use for bootstrapping
 KITTI_BS_KF = 3
 MALAGA_BS_KF = 5
-PARKING_BS_KF = 3
+PARKING_BS_KF = 5
 CUSTOM_BS_KF = 5
 
 # Define dataset paths
@@ -58,12 +59,20 @@ match DATASET:
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7)
+        
         feature_params_gd_detection = dict( maxCorners = 100,
                                         qualityLevel = 0.005,
                                         minDistance = 3,
                                         blockSize = 3)
+        #RANSAC PARAMETERS 
+        ransac_params = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_P3P,
+                                reprojectionError=5.0,
+                                confidence=0.99,
+                                iterationsCount=100)
         
-        # Parameters for LKT
+        # Parameters for LK
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
                             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
@@ -84,7 +93,7 @@ match DATASET:
         window_size = 5
 
         alpha : float = 0.02
-    ##--------------------------------------------------------##
+        abs_eig_min : float = 1e-2
 
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -109,11 +118,19 @@ match DATASET:
                                         qualityLevel = 0.005,
                                         minDistance = 3,
                                         blockSize = 3)
+        #RANSAC PARAMETERS 
+        ransac_params = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_EPNP,
+                                reprojectionError=5.0,
+                                confidence=0.99,
+                                iterationsCount=100)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
                             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
         rows_roi_corners = 3
@@ -130,7 +147,7 @@ match DATASET:
         window_size = 5
 
         alpha : float = 0.02
-    ##--------------------------------------------------------##
+        abs_eig_min : float = 1e-2
         
     case D.PARKING:
         assert 'parking_path' in locals(), "You must define parking_path"
@@ -146,7 +163,7 @@ match DATASET:
         # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
         # Paramaters for Shi-Tomasi corners
         feature_params = dict( maxCorners = 100,
-                            qualityLevel = 0.1,
+                            qualityLevel = 0.01,
                             minDistance = 7,
                             blockSize = 7 )
         
@@ -154,11 +171,19 @@ match DATASET:
                                         qualityLevel = 0.005,
                                         minDistance = 3,
                                         blockSize = 3)
+        #RANSAC PARAMETERS 
+        ransac_params = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_EPNP,
+                                reprojectionError=2.0,
+                                confidence=0.9,
+                                iterationsCount=100)
 
         # Parameters for LKT
         lk_params = dict( winSize  = (21, 21),
                         maxLevel = 2,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.001))
+        
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 5
         rows_roi_corners = 3
@@ -174,8 +199,8 @@ match DATASET:
         # Bundle adjustment parameters
         window_size = 10
 
-        alpha : float = 0.01
-    ##--------------------------------------------------------##
+        alpha : float = 0.05
+        abs_eig_min : float = 1e-5
         
     case D.CUSTOM:
         # Own Dataset
@@ -200,10 +225,19 @@ match DATASET:
                                         qualityLevel = 0.005,
                                         minDistance = 3,
                                         blockSize = 3)
+        
+        #RANSAC PARAMETERS 
+        ransac_params = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_EPNP,
+                                reprojectionError=5.0,
+                                confidence=0.99,
+                                iterationsCount=100)
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
                             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
         rows_roi_corners = 3
@@ -220,7 +254,7 @@ match DATASET:
         window_size = 10
 
         alpha : float = 0.02
-    ##--------------------------------------------------------##
+        abs_eig_min : float = 1e-2
         
     case _:
         raise ValueError("Invalid dataset index")
@@ -237,18 +271,19 @@ class VO_Params():
     shi_tomasi_params_bs : dict # cv2 parameters for Shi-Tomasi corners in bootstrapping phase
     shi_tomasi_params : dict # cv2 parameters for Shi-Tomasi corners
     klt_params : dict # cv2 parameters for KLT tracking
+    ransac_params : dict #cv2 params for ransac
     k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    abs_eig_min : float = 1e-2 
 
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, ransac_params, k, start_idx, new_feature_min_squared_diff, window_size, alpha, abs_eig_min):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
         self.feature_masks_bs = self.get_feature_masks(bs_kf_1, rows_roi_corners_bs, cols_roi_corners_bs)
         self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
         self.shi_tomasi_params_bs = shi_tomasi_params_bs
         self.shi_tomasi_params = shi_tomasi_params
+        self.ransac_params = ransac_params
         self.klt_params = klt_params
         self.k = k
         self.start_idx = start_idx
@@ -264,6 +299,7 @@ class VO_Params():
         self.idx_ground_set = set(ground_list)
         self.approx_car_height = 1.5
         self.alpha = alpha
+        self.abs_eig_min = abs_eig_min
 
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -536,12 +572,7 @@ class Pipeline():
         success, r_vec, t_vec, inliers_idx =  cv2.solvePnPRansac(
             objectPoints=pts_3D,
             imagePoints=pts_2D,
-            cameraMatrix=K,
-            distCoeffs=None,
-            flags=cv2.SOLVEPNP_EPNP,
-            reprojectionError=5.0,
-            confidence=0.99,
-            iterationsCount=100
+            **self.params.ransac_params
         )
 
         if not success:
@@ -900,7 +931,7 @@ class Pipeline():
         if self.use_scale and DATASET in [D.KITTI]: 
             scale, gd_mask, inliers = pipeline.groundDetection(bs_gd_tracked_features_kf_2, gd_point_cloud)
 
-            if self.visualize : 
+            if self.visualize and inliers is not None : 
 
                 gd_fit_2 = bs_gd_tracked_features_kf_2[gd_mask, :, :]
                 gd_fit_2 = gd_fit_2[inliers, :, :]
@@ -939,8 +970,20 @@ class Pipeline():
         return (S, homography, scale)
     
 # create instance of parameters
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, feature_params_gd_detection, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
-plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
+params = VO_Params(bs_kf_1, 
+                   bs_kf_2, 
+                   feature_params, 
+                   feature_params_gd_detection, 
+                   lk_params, 
+                   ransac_params, 
+                   K, 
+                   start_idx, 
+                   new_feature_min_squared_diff, 
+                   window_size, 
+                   alpha, 
+                   abs_eig_min)
+
+plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
@@ -981,6 +1024,7 @@ S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
 frame_counter = params.start_idx + 1
 
 for i in range(params.start_idx + 1, last_frame):
+    start = time.time()
     frame_counter+=1
     # read in next image
     image_path = images[i]
@@ -1040,7 +1084,8 @@ for i in range(params.start_idx + 1, last_frame):
               f"#Candidates Tracked: {last_candidates.shape[0]}\n"
               f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
               f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
-    
+    end = time.time()
+    fps = 1/(end-start)
     if plot_same_window:
         updateTrajectoryPlotBA(
         plot_state, 
@@ -1051,8 +1096,10 @@ for i in range(params.start_idx + 1, last_frame):
         flow_bgr=img_to_show,
         frame_idx=frame_counter,
         n_inliers=n_inliers, 
-        scale=scale
+        scale=scale, 
+        fps=fps
     )
+        
     else:
         updateTrajectoryPlotNoFlowBA(
             plot_state, 
