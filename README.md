@@ -1,12 +1,26 @@
 # Visual Odometry Pipeline
 The repo contains a full-stack implementation in Python utilizing OpenCV functions. A general overview of the pipeline is provided below - for a more detailed description, see the [project report](./assets/VAMR_group_project_report.pdf).
 
-https://github.com/user-attachments/assets/f52dea91-8414-4af9-b0e2-8f1d3caf6863
+<table>
+  <tr>
+    <video src="https://github.com/user-attachments/assets/f52dea91-8414-4af9-b0e2-8f1d3caf6863" width="100%">
+  </tr>
+  <tr>
+    <td style="vertical-align: top;">
+      <img width="1200" height="450" src="https://github.com/user-attachments/assets/7626ea94-42d8-4dbe-bd3e-dc5c948de474" width="70%">
+    </td>
+    <td style="vertical-align: top;">
+      <img width="600" height="450" src="https://github.com/user-attachments/assets/f90bcfd7-ab38-46d6-8e42-b9f087bd63ea" width="100%">
+    </td>
+  </tr>
+</table>
+
+
 
 ## Overview
 
 ### Initialization
-Before continuous operation, an initial set of 2D-3D point correspondences is found by detecting features in the first frame of the dataset, tracking them forward until the baseline is sufficiently large, and then using the 2D-2D correspondences to estimate the fundamental matrix. The rotation and translation can be recovered and used to triangulate 3D landmarks from the 2D features. A gound plane is estimated using RANSAC and used to initialize the scale based on the average height of a car. These correspondences are used to initialize a Markovian state used in continous operation.
+Before continuous operation, an initial set of 2D-3D point correspondences is found by detecting features in the first frame of the dataset, tracking them forward until the baseline is sufficiently large, and then using the 2D-2D correspondences to estimate the fundamental matrix. The rotation and translation can be recovered and used to triangulate 3D landmarks from the 2D features. A ground plane is estimated using RANSAC and used to initialize the scale based on the average height of a car. These correspondences are used to initialize a Markovian state used in continous operation.
 
 ### Continous Operation
 The problem is cast into a Markovian process where the current state depends only on the previous state, previous frame, and current frame: $S_{k} = f(S_{k-1}, I_{k-1}, I_k)$. The state contains the information required by the function $f$ to:
